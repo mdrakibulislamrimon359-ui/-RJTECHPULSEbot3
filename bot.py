@@ -19,8 +19,8 @@ from telegram.ext import (
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN")
 
-# আপনার দেওয়া Admin ID
 ADMIN_ID = 123890
+ADMIN_USERNAME = "RJteam1"
 
 BKASH_NUMBER = os.getenv("BKASH_NUMBER", "01XXXXXXXXX")
 NAGAD_NUMBER = os.getenv("NAGAD_NUMBER", "01XXXXXXXXX")
@@ -82,12 +82,11 @@ def init_db():
     )
     """)
 
-    # Default services
     cur.execute("SELECT COUNT(*) FROM services")
     count = cur.fetchone()[0]
 
     if count == 0:
-        default_services = [
+        services = [
             ("YouTube Promotion", "YouTube", 0),
             ("YouTube Advertising", "YouTube", 0),
             ("YouTube Channel Promotion", "YouTube", 0),
@@ -107,7 +106,7 @@ def init_db():
         cur.executemany("""
         INSERT INTO services(name, platform, price)
         VALUES (?, ?, ?)
-        """, default_services)
+        """, services)
 
     con.commit()
     con.close()
@@ -117,19 +116,20 @@ def save_user(user):
     con = connect()
     cur = con.cursor()
 
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     cur.execute("""
-    INSERT OR REPLACE INTO users
+    INSERT INTO users
     (user_id, username, first_name, joined)
-    VALUES (?, ?, ?, COALESCE(
-        (SELECT joined FROM users WHERE user_id=?),
-        ?
-    ))
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET
+        username=excluded.username,
+        first_name=excluded.first_name
     """, (
         user.id,
         user.username or "",
         user.first_name or "",
-        user.id,
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        now,
     ))
 
     con.commit()
@@ -215,6 +215,7 @@ def get_order(order_id):
 
     row = cur.fetchone()
     con.close()
+
     return row
 
 
@@ -232,6 +233,7 @@ def user_orders(user_id):
 
     rows = cur.fetchall()
     con.close()
+
     return rows
 
 
@@ -248,6 +250,7 @@ def pending_orders():
 
     rows = cur.fetchall()
     con.close()
+
     return rows
 
 
@@ -319,7 +322,11 @@ def toggle_service(service_id):
 
     cur.execute("""
     UPDATE services
-    SET active = CASE active WHEN 1 THEN 0 ELSE 1 END
+    SET active =
+        CASE active
+        WHEN 1 THEN 0
+        ELSE 1
+        END
     WHERE id=?
     """, (service_id,))
 
@@ -328,35 +335,60 @@ def toggle_service(service_id):
 
 
 # =========================================================
-# ADMIN CHECK
+# ADMIN
 # =========================================================
 
-def is_admin(user_id):
-    return user_id == ADMIN_ID
+def is_admin(user_id, username=None):
+    return (
+        user_id == ADMIN_ID
+        or (
+            username
+            and username.lower().lstrip("@")
+            == ADMIN_USERNAME.lower().lstrip("@")
+        )
+    )
 
 
 # =========================================================
 # HOME
 # =========================================================
 
-def home_keyboard(user_id):
+def home_keyboard(user_id, username=None):
 
     keyboard = [
         [
-            InlineKeyboardButton("📱 Services", callback_data="services"),
-            InlineKeyboardButton("🛒 Order", callback_data="services"),
+            InlineKeyboardButton(
+                "📱 Services",
+                callback_data="services"
+            ),
+            InlineKeyboardButton(
+                "🛒 Order",
+                callback_data="services"
+            ),
         ],
         [
-            InlineKeyboardButton("📦 My Orders", callback_data="myorders"),
-            InlineKeyboardButton("🔎 Status", callback_data="status"),
+            InlineKeyboardButton(
+                "📦 My Orders",
+                callback_data="myorders"
+            ),
+            InlineKeyboardButton(
+                "🔎 Status",
+                callback_data="status"
+            ),
         ],
         [
-            InlineKeyboardButton("💳 Payment", callback_data="payment"),
-            InlineKeyboardButton("🛠️ Support", callback_data="support"),
+            InlineKeyboardButton(
+                "💳 Payment",
+                callback_data="payment"
+            ),
+            InlineKeyboardButton(
+                "🛠️ Support",
+                callback_data="support"
+            ),
         ],
     ]
 
-    if is_admin(user_id):
+    if is_admin(user_id, username):
         keyboard.append([
             InlineKeyboardButton(
                 "👑 Admin Panel",
@@ -367,9 +399,14 @@ def home_keyboard(user_id):
     return InlineKeyboardMarkup(keyboard)
 
 
+# =========================================================
+# START
+# =========================================================
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     save_user(update.effective_user)
+    context.user_data.clear()
 
     await update.message.reply_text(
         f"""
@@ -377,65 +414,92 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🤖 *RJ Team Social Media Service*
 
-📱 TikTok
+📱 YouTube
 📘 Facebook
-▶️ YouTube
 📸 Instagram
+🎵 TikTok
 
-🛒 Promotion ও advertising service order করতে নিচের Menu ব্যবহার করুন।
+🛒 Promotion & Advertising Service
 
-👇 একটি অপশন নির্বাচন করুন।
+👇 নিচের Menu থেকে নির্বাচন করুন।
 """,
-        reply_markup=home_keyboard(update.effective_user.id),
+        reply_markup=home_keyboard(
+            update.effective_user.id,
+            update.effective_user.username
+        ),
         parse_mode="Markdown",
     )
 
 
 # =========================================================
-# CALLBACK
+# CALLBACK ROUTER
 # =========================================================
 
-async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def callback_router(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     query = update.callback_query
     await query.answer()
 
     user_id = query.from_user.id
+    username = query.from_user.username
     data = query.data
 
+    # -----------------------------------------------------
     # HOME
+    # -----------------------------------------------------
+
     if data == "home":
+
         await query.edit_message_text(
             "🏠 *RJ Team Main Menu*",
-            reply_markup=home_keyboard(user_id),
+            reply_markup=home_keyboard(
+                user_id,
+                username
+            ),
             parse_mode="Markdown",
         )
         return
 
+    # -----------------------------------------------------
     # SERVICES
+    # -----------------------------------------------------
+
     if data == "services":
 
         keyboard = [
-            [InlineKeyboardButton(
-                "▶️ YouTube",
-                callback_data="platform_YouTube"
-            )],
-            [InlineKeyboardButton(
-                "📘 Facebook",
-                callback_data="platform_Facebook"
-            )],
-            [InlineKeyboardButton(
-                "📸 Instagram",
-                callback_data="platform_Instagram"
-            )],
-            [InlineKeyboardButton(
-                "🎵 TikTok",
-                callback_data="platform_TikTok"
-            )],
-            [InlineKeyboardButton(
-                "🔙 Back",
-                callback_data="home"
-            )],
+            [
+                InlineKeyboardButton(
+                    "▶️ YouTube",
+                    callback_data="platform_YouTube"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "📘 Facebook",
+                    callback_data="platform_Facebook"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "📸 Instagram",
+                    callback_data="platform_Instagram"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🎵 TikTok",
+                    callback_data="platform_TikTok"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🔙 Back",
+                    callback_data="home"
+                )
+            ],
         ]
 
         await query.edit_message_text(
@@ -445,18 +509,29 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # PLATFORM SERVICES
+    # -----------------------------------------------------
+    # PLATFORM
+    # -----------------------------------------------------
+
     if data.startswith("platform_"):
 
         platform = data.replace("platform_", "")
+
         services = get_services(platform)
 
         keyboard = []
 
         for sid, name, price in services:
+
+            price_text = (
+                f"৳{price:g}"
+                if price > 0
+                else "Price not set"
+            )
+
             keyboard.append([
                 InlineKeyboardButton(
-                    f"{name} — ৳{price:g}",
+                    f"{name} — {price_text}",
                     callback_data=f"selectservice_{sid}"
                 )
             ])
@@ -476,15 +551,19 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # SERVICE SELECT
+    # -----------------------------------------------------
+    # SELECT SERVICE
+    # -----------------------------------------------------
+
     if data.startswith("selectservice_"):
 
         sid = int(data.split("_")[1])
         service = get_service(sid)
 
         if not service or service[4] != 1:
+
             await query.answer(
-                "❌ এই service বর্তমানে বন্ধ।",
+                "❌ Service বন্ধ আছে।",
                 show_alert=True
             )
             return
@@ -494,23 +573,31 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["service_id"] = sid
         context.user_data["service"] = service[1]
         context.user_data["price"] = service[3]
-
         context.user_data["step"] = "link"
+
+        price_text = (
+            f"৳{service[3]:g}"
+            if service[3] > 0
+            else "Admin-এর সাথে Price নিশ্চিত করুন"
+        )
 
         await query.edit_message_text(
             f"""
 🛒 *New Order*
 
 📱 Service: *{service[1]}*
-💰 Rate: ৳{service[3]:g}
+💰 Price: {price_text}
 
-এখন আপনার content/profile-এর link পাঠান।
+🔗 এখন আপনার content/profile-এর link পাঠান।
 """,
             parse_mode="Markdown",
         )
         return
 
+    # -----------------------------------------------------
     # PAYMENT
+    # -----------------------------------------------------
+
     if data == "payment":
 
         await query.edit_message_text(
@@ -529,51 +616,67 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Payment করার পর Transaction ID সংরক্ষণ করুন।
 """,
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(
-                    "🔙 Back",
-                    callback_data="home"
-                )]
+                [
+                    InlineKeyboardButton(
+                        "🔙 Back",
+                        callback_data="home"
+                    )
+                ]
             ]),
             parse_mode="Markdown",
         )
         return
 
+    # -----------------------------------------------------
     # SUPPORT
+    # -----------------------------------------------------
+
     if data == "support":
 
         await query.edit_message_text(
             f"""
 🛠️ *Support*
 
-যেকোনো সমস্যা হলে যোগাযোগ করুন:
+যেকোনো সমস্যায় যোগাযোগ করুন:
 
 👤 {SUPPORT}
 """,
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(
-                    "👨‍💼 Contact Support",
-                    url=f"https://t.me/{SUPPORT.replace('@','')}"
-                )],
-                [InlineKeyboardButton(
-                    "🔙 Back",
-                    callback_data="home"
-                )],
+                [
+                    InlineKeyboardButton(
+                        "👨‍💼 Contact Support",
+                        url="https://t.me/RJteam1"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "🔙 Back",
+                        callback_data="home"
+                    )
+                ],
             ]),
             parse_mode="Markdown",
         )
         return
 
+    # -----------------------------------------------------
     # MY ORDERS
+    # -----------------------------------------------------
+
     if data == "myorders":
 
         rows = user_orders(user_id)
 
         if not rows:
+
             text = "📦 আপনার কোনো order নেই।"
+
         else:
+
             text = "📦 *Your Orders*\n\n"
 
             for row in rows:
+
                 oid, service, qty, status, created = row
 
                 text += (
@@ -588,56 +691,73 @@ Payment করার পর Transaction ID সংরক্ষণ করুন।
         await query.edit_message_text(
             text,
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(
-                    "🔙 Back",
-                    callback_data="home"
-                )]
+                [
+                    InlineKeyboardButton(
+                        "🔙 Back",
+                        callback_data="home"
+                    )
+                ]
             ]),
             parse_mode="Markdown",
         )
         return
 
+    # -----------------------------------------------------
     # STATUS
+    # -----------------------------------------------------
+
     if data == "status":
 
+        context.user_data.clear()
         context.user_data["step"] = "status"
 
         await query.edit_message_text(
-            "🔎 আপনার Order ID পাঠান।\n\nউদাহরণ: `25`",
+            "🔎 আপনার Order ID পাঠান।\n\n"
+            "উদাহরণ: `25`",
             parse_mode="Markdown",
         )
         return
 
     # =====================================================
-    # ADMIN
+    # ADMIN PANEL
     # =====================================================
 
     if data == "admin":
 
-        if not is_admin(user_id):
+        if not is_admin(user_id, username):
             return
 
         keyboard = [
-            [InlineKeyboardButton(
-                "📦 Pending Orders",
-                callback_data="admin_pending"
-            )],
-            [InlineKeyboardButton(
-                "📊 Statistics",
-                callback_data="admin_stats"
-            )],
-            [InlineKeyboardButton(
-                "🛍️ Manage Services",
-                callback_data="admin_services"
-            )],
-            [InlineKeyboardButton(
-                "📢 Broadcast",
-                callback_data="admin_broadcast"
-            )],
-            [InlineKeyboardButton(
-                "🔙 Back",
-                callback_data="home"
-            )],
+            [
+                InlineKeyboardButton(
+                    "📦 Pending Orders",
+                    callback_data="admin_pending"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "📊 Statistics",
+                    callback_data="admin_stats"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🛍️ Manage Services",
+                    callback_data="admin_services"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "📢 Broadcast",
+                    callback_data="admin_broadcast"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🔙 Back",
+                    callback_data="home"
+                )
+            ],
         ]
 
         await query.edit_message_text(
@@ -651,10 +771,13 @@ Payment করার পর Transaction ID সংরক্ষণ করুন।
         )
         return
 
+    # =====================================================
     # ADMIN STATS
+    # =====================================================
+
     if data == "admin_stats":
 
-        if not is_admin(user_id):
+        if not is_admin(user_id, username):
             return
 
         await query.edit_message_text(
@@ -666,41 +789,53 @@ Payment করার পর Transaction ID সংরক্ষণ করুন।
 ⏳ Pending Orders: {len(pending_orders())}
 """,
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(
-                    "🔙 Admin Panel",
-                    callback_data="admin"
-                )]
+                [
+                    InlineKeyboardButton(
+                        "🔙 Admin Panel",
+                        callback_data="admin"
+                    )
+                ]
             ]),
             parse_mode="Markdown",
         )
         return
 
+    # =====================================================
     # ADMIN PENDING
+    # =====================================================
+
     if data == "admin_pending":
 
-        if not is_admin(user_id):
+        if not is_admin(user_id, username):
             return
 
         rows = pending_orders()
 
         if not rows:
+
             await query.edit_message_text(
                 "✅ কোনো Pending Order নেই।",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(
-                        "🔙 Admin Panel",
-                        callback_data="admin"
-                    )]
+                    [
+                        InlineKeyboardButton(
+                            "🔙 Admin Panel",
+                            callback_data="admin"
+                        )
+                    ]
                 ]),
             )
             return
+
+        await query.edit_message_text(
+            "📦 Pending orders নিচে দেখানো হচ্ছে..."
+        )
 
         for row in rows[:10]:
 
             (
                 oid,
                 customer_id,
-                username,
+                customer_username,
                 service,
                 link,
                 quantity,
@@ -727,7 +862,7 @@ Payment করার পর Transaction ID সংরক্ষণ করুন।
                 f"""
 📦 *Order #{oid}*
 
-👤 @{username or 'N/A'}
+👤 @{customer_username or 'N/A'}
 🆔 `{customer_id}`
 
 📱 {service}
@@ -744,21 +879,15 @@ Payment করার পর Transaction ID সংরক্ষণ করুন।
                 parse_mode="Markdown",
             )
 
-        await query.edit_message_text(
-            "📦 Pending orders দেখানো হয়েছে।",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(
-                    "🔙 Admin Panel",
-                    callback_data="admin"
-                )]
-            ]),
-        )
         return
 
+    # =====================================================
     # APPROVE
+    # =====================================================
+
     if data.startswith("approve_"):
 
-        if not is_admin(user_id):
+        if not is_admin(user_id, username):
             return
 
         oid = int(data.split("_")[1])
@@ -770,6 +899,7 @@ Payment করার পর Transaction ID সংরক্ষণ করুন।
         set_status(oid, "Approved")
 
         try:
+
             await context.bot.send_message(
                 order[1],
                 f"""
@@ -782,6 +912,7 @@ Payment করার পর Transaction ID সংরক্ষণ করুন।
 """,
                 parse_mode="Markdown",
             )
+
         except Exception:
             pass
 
@@ -790,10 +921,13 @@ Payment করার পর Transaction ID সংরক্ষণ করুন।
         )
         return
 
+    # =====================================================
     # REJECT
+    # =====================================================
+
     if data.startswith("reject_"):
 
-        if not is_admin(user_id):
+        if not is_admin(user_id, username):
             return
 
         oid = int(data.split("_")[1])
@@ -805,6 +939,7 @@ Payment করার পর Transaction ID সংরক্ষণ করুন।
         set_status(oid, "Rejected")
 
         try:
+
             await context.bot.send_message(
                 order[1],
                 f"""
@@ -816,6 +951,7 @@ Support: {SUPPORT}
 """,
                 parse_mode="Markdown",
             )
+
         except Exception:
             pass
 
@@ -824,10 +960,13 @@ Support: {SUPPORT}
         )
         return
 
+    # =====================================================
     # ADMIN SERVICES
+    # =====================================================
+
     if data == "admin_services":
 
-        if not is_admin(user_id):
+        if not is_admin(user_id, username):
             return
 
         rows = get_services()
@@ -840,7 +979,7 @@ Support: {SUPPORT}
 
             keyboard.append([
                 InlineKeyboardButton(
-                    f"{state} {name} ৳{price:g}",
+                    f"{state} {name} — ৳{price:g}",
                     callback_data=f"manage_{sid}"
                 )
             ])
@@ -860,10 +999,13 @@ Support: {SUPPORT}
         )
         return
 
+    # =====================================================
     # MANAGE SERVICE
+    # =====================================================
+
     if data.startswith("manage_"):
 
-        if not is_admin(user_id):
+        if not is_admin(user_id, username):
             return
 
         sid = int(data.split("_")[1])
@@ -872,21 +1014,31 @@ Support: {SUPPORT}
         if not service:
             return
 
-        state = "🟢 Active" if service[4] else "🔴 Disabled"
+        state = (
+            "🟢 Active"
+            if service[4]
+            else "🔴 Disabled"
+        )
 
         keyboard = [
-            [InlineKeyboardButton(
-                "💰 Change Price",
-                callback_data=f"price_{sid}"
-            )],
-            [InlineKeyboardButton(
-                "🔄 Enable / Disable",
-                callback_data=f"toggle_{sid}"
-            )],
-            [InlineKeyboardButton(
-                "🔙 Services",
-                callback_data="admin_services"
-            )],
+            [
+                InlineKeyboardButton(
+                    "💰 Change Price",
+                    callback_data=f"price_{sid}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🔄 Enable / Disable",
+                    callback_data=f"toggle_{sid}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🔙 Services",
+                    callback_data="admin_services"
+                )
+            ],
         ]
 
         await query.edit_message_text(
@@ -903,10 +1055,13 @@ Support: {SUPPORT}
         )
         return
 
-    # CHANGE PRICE
+    # =====================================================
+    # PRICE
+    # =====================================================
+
     if data.startswith("price_"):
 
-        if not is_admin(user_id):
+        if not is_admin(user_id, username):
             return
 
         sid = int(data.split("_")[1])
@@ -916,21 +1071,24 @@ Support: {SUPPORT}
         context.user_data["price_service"] = sid
 
         await query.edit_message_text(
-            "💰 নতুন Price লিখুন।\n\nউদাহরণ: `150`",
+            "💰 নতুন Price লিখুন।\n\n"
+            "উদাহরণ: `150`",
             parse_mode="Markdown",
         )
         return
 
+    # =====================================================
     # TOGGLE
+    # =====================================================
+
     if data.startswith("toggle_"):
 
-        if not is_admin(user_id):
+        if not is_admin(user_id, username):
             return
 
         sid = int(data.split("_")[1])
-        toggle_service(sid)
 
-        await query.answer("Service status পরিবর্তন হয়েছে।")
+        toggle_service(sid)
 
         service = get_service(sid)
 
@@ -938,22 +1096,27 @@ Support: {SUPPORT}
             f"""
 🛍️ *{service[1]}*
 
-📊 Status পরিবর্তন করা হয়েছে।
+📊 Service status পরিবর্তন হয়েছে।
 """,
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(
-                    "🔙 Services",
-                    callback_data="admin_services"
-                )]
+                [
+                    InlineKeyboardButton(
+                        "🔙 Services",
+                        callback_data="admin_services"
+                    )
+                ]
             ]),
             parse_mode="Markdown",
         )
         return
 
+    # =====================================================
     # BROADCAST
+    # =====================================================
+
     if data == "admin_broadcast":
 
-        if not is_admin(user_id):
+        if not is_admin(user_id, username):
             return
 
         context.user_data.clear()
@@ -963,7 +1126,8 @@ Support: {SUPPORT}
             """
 📢 *Broadcast*
 
-যে message সবাইকে পাঠাতে চান সেটি এখন পাঠান।
+যে message সবাইকে পাঠাতে চান,
+এখন সেটি পাঠান।
 """,
             parse_mode="Markdown",
         )
@@ -974,7 +1138,10 @@ Support: {SUPPORT}
 # TEXT HANDLER
 # =========================================================
 
-async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def text_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     user = update.effective_user
     text = update.message.text.strip()
@@ -983,11 +1150,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     step = context.user_data.get("step")
 
-    # =====================================================
-    # ADMIN BROADCAST
-    # =====================================================
+    # -----------------------------------------------------
+    # BROADCAST
+    # -----------------------------------------------------
 
-    if step == "broadcast" and is_admin(user.id):
+    if step == "broadcast" and is_admin(
+        user.id,
+        user.username
+    ):
 
         users = all_users()
         sent = 0
@@ -995,30 +1165,40 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for uid in users:
 
             try:
+
                 await context.bot.send_message(
                     uid,
                     f"📢 *RJ Team Announcement*\n\n{text}",
                     parse_mode="Markdown",
                 )
+
                 sent += 1
+
             except Exception:
                 pass
 
         context.user_data.clear()
 
         await update.message.reply_text(
-            f"✅ Broadcast সম্পন্ন হয়েছে।\n\n"
-            f"👥 Sent: {sent}"
+            f"""
+✅ Broadcast সম্পন্ন হয়েছে।
+
+👥 Sent: {sent}
+"""
         )
         return
 
-    # =====================================================
-    # ADMIN PRICE
-    # =====================================================
+    # -----------------------------------------------------
+    # CHANGE PRICE
+    # -----------------------------------------------------
 
-    if step == "price" and is_admin(user.id):
+    if step == "price" and is_admin(
+        user.id,
+        user.username
+    ):
 
         try:
+
             price = float(text)
 
             if price < 0:
@@ -1027,7 +1207,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
 
             await update.message.reply_text(
-                "❌ সঠিক Price দিন। উদাহরণ: `150`",
+                "❌ সঠিক Price দিন।\n"
+                "উদাহরণ: `150`",
                 parse_mode="Markdown",
             )
             return
@@ -1043,15 +1224,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # =====================================================
-    # ORDER STATUS
-    # =====================================================
+    # -----------------------------------------------------
+    # STATUS
+    # -----------------------------------------------------
 
     if step == "status":
 
-        context.user_data.clear()
-
         if not text.isdigit():
+
             await update.message.reply_text(
                 "❌ সঠিক Order ID দিন।"
             )
@@ -1061,16 +1241,26 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order = get_order(oid)
 
         if not order:
+
             await update.message.reply_text(
                 "❌ Order পাওয়া যায়নি।"
             )
             return
 
-        if order[1] != user.id and not is_admin(user.id):
+        if (
+            order[1] != user.id
+            and not is_admin(
+                user.id,
+                user.username
+            )
+        ):
+
             await update.message.reply_text(
                 "❌ এই Order আপনার নয়।"
             )
             return
+
+        context.user_data.clear()
 
         await update.message.reply_text(
             f"""
@@ -1091,9 +1281,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # =====================================================
-    # ORDER LINK
-    # =====================================================
+    # -----------------------------------------------------
+    # LINK
+    # -----------------------------------------------------
 
     if step == "link":
 
@@ -1101,18 +1291,15 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["step"] = "quantity"
 
         await update.message.reply_text(
-            """
-🔢 এখন Quantity লিখুন।
-
-উদাহরণ:
-`100`
-"""
+            "🔢 এখন Quantity লিখুন।\n\n"
+            "উদাহরণ: `100`",
+            parse_mode="Markdown",
         )
         return
 
-    # =====================================================
+    # -----------------------------------------------------
     # QUANTITY
-    # =====================================================
+    # -----------------------------------------------------
 
     if step == "quantity":
 
@@ -1127,18 +1314,24 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["step"] = "payment"
 
         keyboard = [
-            [InlineKeyboardButton(
-                "🟣 bKash",
-                callback_data="pay_bkash"
-            )],
-            [InlineKeyboardButton(
-                "🟢 Nagad",
-                callback_data="pay_nagad"
-            )],
-            [InlineKeyboardButton(
-                "🔵 Rocket",
-                callback_data="pay_rocket"
-            )],
+            [
+                InlineKeyboardButton(
+                    "🟣 bKash",
+                    callback_data="pay_bkash"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🟢 Nagad",
+                    callback_data="pay_nagad"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🔵 Rocket",
+                    callback_data="pay_rocket"
+                )
+            ],
         ]
 
         await update.message.reply_text(
@@ -1147,9 +1340,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # =====================================================
+    # -----------------------------------------------------
     # TRANSACTION
-    # =====================================================
+    # -----------------------------------------------------
 
     if step == "transaction":
 
@@ -1159,6 +1352,21 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         link = context.user_data.get("link")
         quantity = context.user_data.get("quantity")
         payment = context.user_data.get("payment")
+
+        if not all([
+            service,
+            link,
+            quantity,
+            payment
+        ]):
+
+            context.user_data.clear()
+
+            await update.message.reply_text(
+                "❌ Order session শেষ হয়ে গেছে। "
+                "/start দিয়ে আবার চেষ্টা করুন।"
+            )
+            return
 
         oid = create_order(
             user,
@@ -1183,14 +1391,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 `{transaction}`
 
 📊 Status: *Pending Verification*
-
-Admin verification-এর পর status update হবে।
 """,
             parse_mode="Markdown",
         )
 
         # ADMIN NOTIFICATION
         try:
+
             await context.bot.send_message(
                 ADMIN_ID,
                 f"""
@@ -1212,8 +1419,12 @@ Admin verification-এর পর status update হবে।
 """,
                 parse_mode="Markdown",
             )
-        except Exception:
-            pass
+
+        except Exception as e:
+            logging.error(
+                "Admin notification error: %s",
+                e
+            )
 
         context.user_data.clear()
         return
@@ -1224,10 +1435,13 @@ Admin verification-এর পর status update হবে।
 
 
 # =========================================================
-# PAYMENT CALLBACK
+# PAYMENT HANDLER
 # =========================================================
 
-async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def payment_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     query = update.callback_query
     await query.answer()
@@ -1263,17 +1477,20 @@ Payment করার পর Transaction ID পাঠান।
 
 
 # =========================================================
-# CALLBACK ROUTER
+# CALLBACK MASTER
 # =========================================================
 
-async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def master_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     data = update.callback_query.data
 
     if data.startswith("pay_"):
-        await payment_callback(update, context)
+        await payment_handler(update, context)
     else:
-        await callback(update, context)
+        await callback_router(update, context)
 
 
 # =========================================================
@@ -1283,17 +1500,27 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
 
     if BOT_TOKEN == "YOUR_BOT_TOKEN":
-        print("❌ BOT_TOKEN সেট করা হয়নি।")
+
+        print(
+            "❌ BOT_TOKEN সেট করা হয়নি। "
+            "GitHub Secret-এ BOT_TOKEN দিন।"
+        )
+
         return
 
     init_db()
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(
+        BOT_TOKEN
+    ).build()
 
-    app.add_handler(CommandHandler("start", start))
+    # Only /start command
+    app.add_handler(
+        CommandHandler("start", start)
+    )
 
     app.add_handler(
-        CallbackQueryHandler(router)
+        CallbackQueryHandler(master_callback)
     )
 
     app.add_handler(
