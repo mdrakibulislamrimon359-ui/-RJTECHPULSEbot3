@@ -1,1541 +1,1234 @@
 import os
-import sqlite3
-import logging
-from datetime import datetime
+import asyncio
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Thread
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from openai import AsyncOpenAI
+
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
+
+from telegram.constants import ChatMemberStatus
+
 from telegram.ext import (
     Application,
     CommandHandler,
-    CallbackQueryHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
+    ChatMemberHandler,
     filters,
 )
 
-# =========================================================
-# SETTINGS
-# =========================================================
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN")
+# ============================================================
+# RJ TEAM BOT SETTINGS
+# ============================================================
 
-ADMIN_ID = 123890
-ADMIN_USERNAME = "RJteam1"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-BKASH_NUMBER = os.getenv("BKASH_NUMBER", "01XXXXXXXXX")
-NAGAD_NUMBER = os.getenv("NAGAD_NUMBER", "01XXXXXXXXX")
-ROCKET_NUMBER = os.getenv("ROCKET_NUMBER", "01XXXXXXXXX")
+# Current OpenAI API model
+OPENAI_MODEL = os.getenv(
+    "OPENAI_MODEL",
+    "gpt-5.6-luna"
+)
 
-SUPPORT = "@RJteam1"
+PORT = int(os.getenv("PORT", "10000"))
 
-DB = "rjteam.db"
+COMMUNITY_NAME = "RJ Team Bangladesh Community"
+CREATOR_NAME = "Rakib Sar"
 
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
+OWNER_USERNAME = "@RJteam1"
+PARTNER_USERNAME = "@Apple20237"
+ASSISTANT_USERNAME = "@Apple20237"
+
+TIKTOK_USERNAME = "lyrics.song333"
+YOUTUBE_LINK = "https://youtube.com/@rakib22"
+
+
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN is missing")
+
+if not OPENAI_API_KEY:
+    raise RuntimeError("OPENAI_API_KEY is missing")
+
+
+client = AsyncOpenAI(
+    api_key=OPENAI_API_KEY
 )
 
 
-# =========================================================
-# DATABASE
-# =========================================================
-
-def connect():
-    return sqlite3.connect(DB)
-
-
-def init_db():
-    con = connect()
-    cur = con.cursor()
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        username TEXT,
-        first_name TEXT,
-        joined TEXT
-    )
-    """)
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS orders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        username TEXT,
-        service TEXT,
-        link TEXT,
-        quantity INTEGER,
-        payment TEXT,
-        transaction_id TEXT,
-        status TEXT,
-        created TEXT
-    )
-    """)
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS services (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT,
-        platform TEXT,
-        price REAL DEFAULT 0,
-        active INTEGER DEFAULT 1
-    )
-    """)
-
-    cur.execute("SELECT COUNT(*) FROM services")
-    count = cur.fetchone()[0]
-
-    if count == 0:
-        services = [
-            ("YouTube Promotion", "YouTube", 0),
-            ("YouTube Advertising", "YouTube", 0),
-            ("YouTube Channel Promotion", "YouTube", 0),
-
-            ("Facebook Page Promotion", "Facebook", 0),
-            ("Facebook Post Promotion", "Facebook", 0),
-            ("Facebook Video Promotion", "Facebook", 0),
-
-            ("Instagram Profile Promotion", "Instagram", 0),
-            ("Instagram Post Promotion", "Instagram", 0),
-            ("Instagram Reel Promotion", "Instagram", 0),
-
-            ("TikTok Profile Promotion", "TikTok", 0),
-            ("TikTok Video Promotion", "TikTok", 0),
-        ]
-
-        cur.executemany("""
-        INSERT INTO services(name, platform, price)
-        VALUES (?, ?, ?)
-        """, services)
-
-    con.commit()
-    con.close()
-
-
-def save_user(user):
-    con = connect()
-    cur = con.cursor()
-
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    cur.execute("""
-    INSERT INTO users
-    (user_id, username, first_name, joined)
-    VALUES (?, ?, ?, ?)
-    ON CONFLICT(user_id) DO UPDATE SET
-        username=excluded.username,
-        first_name=excluded.first_name
-    """, (
-        user.id,
-        user.username or "",
-        user.first_name or "",
-        now,
-    ))
-
-    con.commit()
-    con.close()
-
-
-def get_services(platform=None):
-    con = connect()
-    cur = con.cursor()
-
-    if platform:
-        cur.execute("""
-        SELECT id, name, price
-        FROM services
-        WHERE platform=? AND active=1
-        ORDER BY id
-        """, (platform,))
-    else:
-        cur.execute("""
-        SELECT id, name, platform, price, active
-        FROM services
-        ORDER BY id
-        """)
-
-    rows = cur.fetchall()
-    con.close()
-    return rows
-
-
-def get_service(service_id):
-    con = connect()
-    cur = con.cursor()
-
-    cur.execute("""
-    SELECT id, name, platform, price, active
-    FROM services
-    WHERE id=?
-    """, (service_id,))
-
-    row = cur.fetchone()
-    con.close()
-    return row
-
-
-def create_order(user, service, link, quantity, payment, transaction):
-    con = connect()
-    cur = con.cursor()
-
-    cur.execute("""
-    INSERT INTO orders
-    (user_id, username, service, link, quantity,
-     payment, transaction_id, status, created)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        user.id,
-        user.username or "",
-        service,
-        link,
-        quantity,
-        payment,
-        transaction,
-        "Pending Verification",
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    ))
-
-    order_id = cur.lastrowid
-
-    con.commit()
-    con.close()
-
-    return order_id
-
-
-def get_order(order_id):
-    con = connect()
-    cur = con.cursor()
-
-    cur.execute("""
-    SELECT *
-    FROM orders
-    WHERE id=?
-    """, (order_id,))
-
-    row = cur.fetchone()
-    con.close()
-
-    return row
-
-
-def user_orders(user_id):
-    con = connect()
-    cur = con.cursor()
-
-    cur.execute("""
-    SELECT id, service, quantity, status, created
-    FROM orders
-    WHERE user_id=?
-    ORDER BY id DESC
-    LIMIT 20
-    """, (user_id,))
-
-    rows = cur.fetchall()
-    con.close()
-
-    return rows
-
-
-def pending_orders():
-    con = connect()
-    cur = con.cursor()
-
-    cur.execute("""
-    SELECT *
-    FROM orders
-    WHERE status='Pending Verification'
-    ORDER BY id DESC
-    """)
-
-    rows = cur.fetchall()
-    con.close()
-
-    return rows
-
-
-def set_status(order_id, status):
-    con = connect()
-    cur = con.cursor()
-
-    cur.execute("""
-    UPDATE orders
-    SET status=?
-    WHERE id=?
-    """, (status, order_id))
-
-    con.commit()
-    con.close()
-
-
-def total_users():
-    con = connect()
-    cur = con.cursor()
-
-    cur.execute("SELECT COUNT(*) FROM users")
-    result = cur.fetchone()[0]
-
-    con.close()
-    return result
-
-
-def total_orders():
-    con = connect()
-    cur = con.cursor()
-
-    cur.execute("SELECT COUNT(*) FROM orders")
-    result = cur.fetchone()[0]
-
-    con.close()
-    return result
-
-
-def all_users():
-    con = connect()
-    cur = con.cursor()
-
-    cur.execute("SELECT user_id FROM users")
-
-    rows = cur.fetchall()
-    con.close()
-
-    return [x[0] for x in rows]
-
-
-def change_price(service_id, price):
-    con = connect()
-    cur = con.cursor()
-
-    cur.execute("""
-    UPDATE services
-    SET price=?
-    WHERE id=?
-    """, (price, service_id))
-
-    con.commit()
-    con.close()
-
-
-def toggle_service(service_id):
-    con = connect()
-    cur = con.cursor()
-
-    cur.execute("""
-    UPDATE services
-    SET active =
-        CASE active
-        WHEN 1 THEN 0
-        ELSE 1
-        END
-    WHERE id=?
-    """, (service_id,))
-
-    con.commit()
-    con.close()
-
-
-# =========================================================
-# ADMIN
-# =========================================================
-
-def is_admin(user_id, username=None):
-    return (
-        user_id == ADMIN_ID
-        or (
-            username
-            and username.lower().lstrip("@")
-            == ADMIN_USERNAME.lower().lstrip("@")
+# ============================================================
+# RENDER HEALTH SERVER
+# ============================================================
+
+class HealthHandler(BaseHTTPRequestHandler):
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header(
+            "Content-Type",
+            "text/plain; charset=utf-8"
         )
+        self.end_headers()
+
+        self.wfile.write(
+            b"RJ Team Bot is running!"
+        )
+
+    def log_message(self, format, *args):
+        pass
+
+
+def start_health_server():
+
+    server = HTTPServer(
+        ("0.0.0.0", PORT),
+        HealthHandler
     )
 
+    server.serve_forever()
 
-# =========================================================
-# HOME
-# =========================================================
 
-def home_keyboard(user_id, username=None):
+# ============================================================
+# TRANSLATE BUTTON
+# ============================================================
 
-    keyboard = [
+def translate_keyboard():
+
+    return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
-                "📱 Services",
-                callback_data="services"
-            ),
-            InlineKeyboardButton(
-                "🛒 Order",
-                callback_data="services"
-            ),
-        ],
+                "🌐 Translate",
+                callback_data="translate"
+            )
+        ]
+    ])
+
+
+# ============================================================
+# LANGUAGE MENU
+# ============================================================
+
+def language_keyboard():
+
+    return InlineKeyboardMarkup([
+
         [
             InlineKeyboardButton(
-                "📦 My Orders",
-                callback_data="myorders"
+                "🇬🇧 English",
+                callback_data="lang_English"
             ),
             InlineKeyboardButton(
-                "🔎 Status",
-                callback_data="status"
+                "🇮🇳 Hindi",
+                callback_data="lang_Hindi"
             ),
         ],
+
         [
             InlineKeyboardButton(
-                "💳 Payment",
-                callback_data="payment"
+                "🇸🇦 Arabic",
+                callback_data="lang_Arabic"
             ),
             InlineKeyboardButton(
-                "🛠️ Support",
-                callback_data="support"
+                "🇵🇰 Urdu",
+                callback_data="lang_Urdu"
             ),
         ],
+
+        [
+            InlineKeyboardButton(
+                "🇨🇳 Chinese",
+                callback_data="lang_Chinese"
+            ),
+            InlineKeyboardButton(
+                "🇯🇵 Japanese",
+                callback_data="lang_Japanese"
+            ),
+        ],
+
+        [
+            InlineKeyboardButton(
+                "🇰🇷 Korean",
+                callback_data="lang_Korean"
+            ),
+            InlineKeyboardButton(
+                "🇧🇩 Bangla",
+                callback_data="lang_Bangla"
+            ),
+        ],
+
+        [
+            InlineKeyboardButton(
+                "🇫🇷 French",
+                callback_data="lang_French"
+            ),
+            InlineKeyboardButton(
+                "🇩🇪 German",
+                callback_data="lang_German"
+            ),
+        ],
+
+        [
+            InlineKeyboardButton(
+                "🇪🇸 Spanish",
+                callback_data="lang_Spanish"
+            ),
+            InlineKeyboardButton(
+                "🇹🇷 Turkish",
+                callback_data="lang_Turkish"
+            ),
+        ],
+
+        [
+            InlineKeyboardButton(
+                "❌ Close",
+                callback_data="close_translate"
+            )
+        ]
+    ])
+
+
+# ============================================================
+# GROUP RULE NOTICE
+# ============================================================
+
+GROUP_NOTICE = """
+🌙 RJ TEAM BANGLADESH COMMUNITY 🇧🇩
+
+🤝 আসুন, সবাই সুন্দর ভাষায় কথা বলি।
+
+❌ গালাগালি
+❌ অশ্লীল কথা
+❌ কাউকে অপমান করা
+❌ খারাপ নামে ডাকা
+❌ হেয় করা বা বিদ্রূপ করা
+❌ অশালীন/অসম্মানজনক আচরণ
+
+✅ ভদ্রভাবে কথা বলুন
+✅ সবাইকে সম্মান করুন
+✅ মতের অমিল হলেও সুন্দরভাবে কথা বলুন
+✅ ভালো কথা বলুন, ভালো পরিবেশ তৈরি করুন 🌸
+
+📖 ইসলামের শিক্ষা:
+
+আল্লাহ তাআলা বলেন, একে অপরকে উপহাস করো না এবং একে অপরকে অপমান করো না বা মন্দ নামে ডেকো না।
+
+— সূরা আল-হুজুরাত ৪৯:১১
+
+🕌 রাসুলুল্লাহ ﷺ বলেছেন:
+
+“মুমিন গালিদাতা, অভিশাপদাতা, অশ্লীলভাষী বা কুরুচিপূর্ণ ভাষার মানুষ নয়।”
+
+— জামে তিরমিজি ১৯৭৭
+
+⚠️ RJ Team Group Rule:
+
+🥇 ১ম বার → ⚠️ সতর্কবার্তা
+
+🥈 ২য় বার → 🚫 Group থেকে Kick
+
+🌸 মনে রাখুন—
+আপনার কথা আপনার চরিত্রের পরিচয় দেয়।
+
+🤲 সুন্দর কথা বলুন, অন্যকে সম্মান করুন এবং আল্লাহকে ভয় করুন।
+
+🇧🇩 RJ Team Bangladesh Community
+"""
+
+
+# ============================================================
+# BAD WORD DETECTION
+# ============================================================
+
+BAD_WORDS = [
+
+    # Bangla
+    "চোদা",
+    "চোদন",
+    "চুদ",
+    "চুদা",
+    "চুদতে",
+    "চুদবি",
+    "চুদবো",
+    "চুদমারানি",
+    "খানকি",
+    "খানকির",
+    "বাঞ্চোদ",
+    "বাল",
+    "বালের",
+    "হারামজাদা",
+    "হারামি",
+    "শুয়োর",
+    "কুত্তা",
+    "কুত্তার",
+    "মাদারচোদ",
+    "বেশ্যা",
+    "জারজ",
+
+    # Banglish
+    "chod",
+    "choda",
+    "chudan",
+    "chud",
+    "chodbi",
+    "chodbo",
+    "madarchod",
+    "banchod",
+    "khanki",
+    "haramjada",
+    "harami",
+    "bal",
+    "kutta",
+    "shuar",
+    "beshya",
+    "jaraj",
+
+    # English
+    "fuck",
+    "fucking",
+    "motherfucker",
+    "bitch",
+    "asshole",
+    "bastard",
+    "shit",
+    "dick",
+    "pussy",
+]
+
+
+def normalize_text(text):
+
+    text = text.lower()
+
+    separators = [
+        " ",
+        "\n",
+        "\t",
+        ".",
+        ",",
+        "!",
+        "?",
+        "-",
+        "_",
+        "*",
+        "#",
+        "@",
     ]
 
-    if is_admin(user_id, username):
-        keyboard.append([
-            InlineKeyboardButton(
-                "👑 Admin Panel",
-                callback_data="admin"
-            )
-        ])
+    for char in separators:
+        text = text.replace(char, "")
 
-    return InlineKeyboardMarkup(keyboard)
+    return text
 
 
-# =========================================================
-# START
-# =========================================================
+def contains_bad_language(text):
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not text:
+        return False
 
-    save_user(update.effective_user)
-    context.user_data.clear()
+    original = text.lower()
+    normalized = normalize_text(text)
 
-    await update.message.reply_text(
-        f"""
-👋 Welcome {update.effective_user.first_name}!
+    for word in BAD_WORDS:
 
-🤖 *RJ Team Social Media Service*
+        if word in original:
+            return True
 
-📱 YouTube
-📘 Facebook
-📸 Instagram
-🎵 TikTok
+        if word in normalized:
+            return True
 
-🛒 Promotion & Advertising Service
-
-👇 নিচের Menu থেকে নির্বাচন করুন।
-""",
-        reply_markup=home_keyboard(
-            update.effective_user.id,
-            update.effective_user.username
-        ),
-        parse_mode="Markdown",
-    )
+    return False
 
 
-# =========================================================
-# CALLBACK ROUTER
-# =========================================================
+# ============================================================
+# ADMIN CHECK
+# ============================================================
 
-async def callback_router(
+async def is_admin(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    query = update.callback_query
-    await query.answer()
+    if not update.effective_chat:
+        return False
 
-    user_id = query.from_user.id
-    username = query.from_user.username
-    data = query.data
+    if not update.effective_user:
+        return False
 
-    # -----------------------------------------------------
-    # HOME
-    # -----------------------------------------------------
+    try:
 
-    if data == "home":
-
-        await query.edit_message_text(
-            "🏠 *RJ Team Main Menu*",
-            reply_markup=home_keyboard(
-                user_id,
-                username
-            ),
-            parse_mode="Markdown",
+        member = await context.bot.get_chat_member(
+            update.effective_chat.id,
+            update.effective_user.id
         )
-        return
 
-    # -----------------------------------------------------
-    # SERVICES
-    # -----------------------------------------------------
-
-    if data == "services":
-
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "▶️ YouTube",
-                    callback_data="platform_YouTube"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "📘 Facebook",
-                    callback_data="platform_Facebook"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "📸 Instagram",
-                    callback_data="platform_Instagram"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🎵 TikTok",
-                    callback_data="platform_TikTok"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🔙 Back",
-                    callback_data="home"
-                )
-            ],
+        return member.status in [
+            ChatMemberStatus.ADMINISTRATOR,
+            ChatMemberStatus.OWNER
         ]
 
-        await query.edit_message_text(
-            "📱 *Select Platform*",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown",
-        )
-        return
-
-    # -----------------------------------------------------
-    # PLATFORM
-    # -----------------------------------------------------
-
-    if data.startswith("platform_"):
-
-        platform = data.replace("platform_", "")
-
-        services = get_services(platform)
-
-        keyboard = []
-
-        for sid, name, price in services:
-
-            price_text = (
-                f"৳{price:g}"
-                if price > 0
-                else "Price not set"
-            )
-
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"{name} — {price_text}",
-                    callback_data=f"selectservice_{sid}"
-                )
-            ])
-
-        keyboard.append([
-            InlineKeyboardButton(
-                "🔙 Back",
-                callback_data="services"
-            )
-        ])
-
-        await query.edit_message_text(
-            f"📱 *{platform} Services*\n\n"
-            "আপনার প্রয়োজনীয় service নির্বাচন করুন:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown",
-        )
-        return
-
-    # -----------------------------------------------------
-    # SELECT SERVICE
-    # -----------------------------------------------------
-
-    if data.startswith("selectservice_"):
-
-        sid = int(data.split("_")[1])
-        service = get_service(sid)
-
-        if not service or service[4] != 1:
-
-            await query.answer(
-                "❌ Service বন্ধ আছে।",
-                show_alert=True
-            )
-            return
-
-        context.user_data.clear()
-
-        context.user_data["service_id"] = sid
-        context.user_data["service"] = service[1]
-        context.user_data["price"] = service[3]
-        context.user_data["step"] = "link"
-
-        price_text = (
-            f"৳{service[3]:g}"
-            if service[3] > 0
-            else "Admin-এর সাথে Price নিশ্চিত করুন"
-        )
-
-        await query.edit_message_text(
-            f"""
-🛒 *New Order*
-
-📱 Service: *{service[1]}*
-💰 Price: {price_text}
-
-🔗 এখন আপনার content/profile-এর link পাঠান।
-""",
-            parse_mode="Markdown",
-        )
-        return
-
-    # -----------------------------------------------------
-    # PAYMENT
-    # -----------------------------------------------------
-
-    if data == "payment":
-
-        await query.edit_message_text(
-            f"""
-💳 *Payment Methods*
-
-🟣 bKash
-`{BKASH_NUMBER}`
-
-🟢 Nagad
-`{NAGAD_NUMBER}`
-
-🔵 Rocket
-`{ROCKET_NUMBER}`
-
-Payment করার পর Transaction ID সংরক্ষণ করুন।
-""",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "🔙 Back",
-                        callback_data="home"
-                    )
-                ]
-            ]),
-            parse_mode="Markdown",
-        )
-        return
-
-    # -----------------------------------------------------
-    # SUPPORT
-    # -----------------------------------------------------
-
-    if data == "support":
-
-        await query.edit_message_text(
-            f"""
-🛠️ *Support*
-
-যেকোনো সমস্যায় যোগাযোগ করুন:
-
-👤 {SUPPORT}
-""",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "👨‍💼 Contact Support",
-                        url="https://t.me/RJteam1"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "🔙 Back",
-                        callback_data="home"
-                    )
-                ],
-            ]),
-            parse_mode="Markdown",
-        )
-        return
-
-    # -----------------------------------------------------
-    # MY ORDERS
-    # -----------------------------------------------------
-
-    if data == "myorders":
-
-        rows = user_orders(user_id)
-
-        if not rows:
-
-            text = "📦 আপনার কোনো order নেই।"
-
-        else:
-
-            text = "📦 *Your Orders*\n\n"
-
-            for row in rows:
-
-                oid, service, qty, status, created = row
-
-                text += (
-                    f"🆔 `#{oid}`\n"
-                    f"📱 {service}\n"
-                    f"🔢 Quantity: {qty}\n"
-                    f"📊 {status}\n"
-                    f"🕐 {created}\n"
-                    f"━━━━━━━━━━━━\n"
-                )
-
-        await query.edit_message_text(
-            text,
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "🔙 Back",
-                        callback_data="home"
-                    )
-                ]
-            ]),
-            parse_mode="Markdown",
-        )
-        return
-
-    # -----------------------------------------------------
-    # STATUS
-    # -----------------------------------------------------
-
-    if data == "status":
-
-        context.user_data.clear()
-        context.user_data["step"] = "status"
-
-        await query.edit_message_text(
-            "🔎 আপনার Order ID পাঠান।\n\n"
-            "উদাহরণ: `25`",
-            parse_mode="Markdown",
-        )
-        return
-
-    # =====================================================
-    # ADMIN PANEL
-    # =====================================================
-
-    if data == "admin":
-
-        if not is_admin(user_id, username):
-            return
-
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "📦 Pending Orders",
-                    callback_data="admin_pending"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "📊 Statistics",
-                    callback_data="admin_stats"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🛍️ Manage Services",
-                    callback_data="admin_services"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "📢 Broadcast",
-                    callback_data="admin_broadcast"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🔙 Back",
-                    callback_data="home"
-                )
-            ],
-        ]
-
-        await query.edit_message_text(
-            """
-👑 *RJ TEAM ADMIN PANEL*
-
-নিচের Menu থেকে Bot control করুন।
-""",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown",
-        )
-        return
-
-    # =====================================================
-    # ADMIN STATS
-    # =====================================================
-
-    if data == "admin_stats":
-
-        if not is_admin(user_id, username):
-            return
-
-        await query.edit_message_text(
-            f"""
-📊 *Bot Statistics*
-
-👥 Total Users: {total_users()}
-📦 Total Orders: {total_orders()}
-⏳ Pending Orders: {len(pending_orders())}
-""",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "🔙 Admin Panel",
-                        callback_data="admin"
-                    )
-                ]
-            ]),
-            parse_mode="Markdown",
-        )
-        return
-
-    # =====================================================
-    # ADMIN PENDING
-    # =====================================================
-
-    if data == "admin_pending":
-
-        if not is_admin(user_id, username):
-            return
-
-        rows = pending_orders()
-
-        if not rows:
-
-            await query.edit_message_text(
-                "✅ কোনো Pending Order নেই।",
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton(
-                            "🔙 Admin Panel",
-                            callback_data="admin"
-                        )
-                    ]
-                ]),
-            )
-            return
-
-        await query.edit_message_text(
-            "📦 Pending orders নিচে দেখানো হচ্ছে..."
-        )
-
-        for row in rows[:10]:
-
-            (
-                oid,
-                customer_id,
-                customer_username,
-                service,
-                link,
-                quantity,
-                payment,
-                transaction,
-                status,
-                created,
-            ) = row
-
-            keyboard = [
-                [
-                    InlineKeyboardButton(
-                        "✅ Approve",
-                        callback_data=f"approve_{oid}"
-                    ),
-                    InlineKeyboardButton(
-                        "❌ Reject",
-                        callback_data=f"reject_{oid}"
-                    ),
-                ]
-            ]
-
-            await query.message.reply_text(
-                f"""
-📦 *Order #{oid}*
-
-👤 @{customer_username or 'N/A'}
-🆔 `{customer_id}`
-
-📱 {service}
-🔗 {link}
-🔢 Quantity: {quantity}
-
-💳 {payment}
-🧾 `{transaction}`
-
-📊 {status}
-🕐 {created}
-""",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode="Markdown",
-            )
-
-        return
-
-    # =====================================================
-    # APPROVE
-    # =====================================================
-
-    if data.startswith("approve_"):
-
-        if not is_admin(user_id, username):
-            return
-
-        oid = int(data.split("_")[1])
-        order = get_order(oid)
-
-        if not order:
-            return
-
-        set_status(oid, "Approved")
-
-        try:
-
-            await context.bot.send_message(
-                order[1],
-                f"""
-✅ *Order Approved*
-
-🆔 Order: `#{oid}`
-📱 Service: {order[3]}
-
-📊 Status: *Approved*
-""",
-                parse_mode="Markdown",
-            )
-
-        except Exception:
-            pass
-
-        await query.edit_message_text(
-            f"✅ Order #{oid} Approved."
-        )
-        return
-
-    # =====================================================
-    # REJECT
-    # =====================================================
-
-    if data.startswith("reject_"):
-
-        if not is_admin(user_id, username):
-            return
-
-        oid = int(data.split("_")[1])
-        order = get_order(oid)
-
-        if not order:
-            return
-
-        set_status(oid, "Rejected")
-
-        try:
-
-            await context.bot.send_message(
-                order[1],
-                f"""
-❌ *Order Rejected*
-
-🆔 Order: `#{oid}`
-
-Support: {SUPPORT}
-""",
-                parse_mode="Markdown",
-            )
-
-        except Exception:
-            pass
-
-        await query.edit_message_text(
-            f"❌ Order #{oid} Rejected."
-        )
-        return
-
-    # =====================================================
-    # ADMIN SERVICES
-    # =====================================================
-
-    if data == "admin_services":
-
-        if not is_admin(user_id, username):
-            return
-
-        rows = get_services()
-
-        keyboard = []
-
-        for sid, name, platform, price, active in rows:
-
-            state = "🟢" if active else "🔴"
-
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"{state} {name} — ৳{price:g}",
-                    callback_data=f"manage_{sid}"
-                )
-            ])
-
-        keyboard.append([
-            InlineKeyboardButton(
-                "🔙 Admin Panel",
-                callback_data="admin"
-            )
-        ])
-
-        await query.edit_message_text(
-            "🛍️ *Manage Services*\n\n"
-            "Service নির্বাচন করুন:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown",
-        )
-        return
-
-    # =====================================================
-    # MANAGE SERVICE
-    # =====================================================
-
-    if data.startswith("manage_"):
-
-        if not is_admin(user_id, username):
-            return
-
-        sid = int(data.split("_")[1])
-        service = get_service(sid)
-
-        if not service:
-            return
-
-        state = (
-            "🟢 Active"
-            if service[4]
-            else "🔴 Disabled"
-        )
-
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "💰 Change Price",
-                    callback_data=f"price_{sid}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🔄 Enable / Disable",
-                    callback_data=f"toggle_{sid}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🔙 Services",
-                    callback_data="admin_services"
-                )
-            ],
-        ]
-
-        await query.edit_message_text(
-            f"""
-🛍️ *Service Management*
-
-📱 {service[1]}
-🌐 Platform: {service[2]}
-💰 Price: ৳{service[3]:g}
-📊 {state}
-""",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown",
-        )
-        return
-
-    # =====================================================
-    # PRICE
-    # =====================================================
-
-    if data.startswith("price_"):
-
-        if not is_admin(user_id, username):
-            return
-
-        sid = int(data.split("_")[1])
-
-        context.user_data.clear()
-        context.user_data["step"] = "price"
-        context.user_data["price_service"] = sid
-
-        await query.edit_message_text(
-            "💰 নতুন Price লিখুন।\n\n"
-            "উদাহরণ: `150`",
-            parse_mode="Markdown",
-        )
-        return
-
-    # =====================================================
-    # TOGGLE
-    # =====================================================
-
-    if data.startswith("toggle_"):
-
-        if not is_admin(user_id, username):
-            return
-
-        sid = int(data.split("_")[1])
-
-        toggle_service(sid)
-
-        service = get_service(sid)
-
-        await query.edit_message_text(
-            f"""
-🛍️ *{service[1]}*
-
-📊 Service status পরিবর্তন হয়েছে।
-""",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "🔙 Services",
-                        callback_data="admin_services"
-                    )
-                ]
-            ]),
-            parse_mode="Markdown",
-        )
-        return
-
-    # =====================================================
-    # BROADCAST
-    # =====================================================
-
-    if data == "admin_broadcast":
-
-        if not is_admin(user_id, username):
-            return
-
-        context.user_data.clear()
-        context.user_data["step"] = "broadcast"
-
-        await query.edit_message_text(
-            """
-📢 *Broadcast*
-
-যে message সবাইকে পাঠাতে চান,
-এখন সেটি পাঠান।
-""",
-            parse_mode="Markdown",
-        )
-        return
-
-
-# =========================================================
-# TEXT HANDLER
-# =========================================================
-
-async def text_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    user = update.effective_user
-    text = update.message.text.strip()
-
-    save_user(user)
-
-    step = context.user_data.get("step")
-
-    # -----------------------------------------------------
-    # BROADCAST
-    # -----------------------------------------------------
-
-    if step == "broadcast" and is_admin(
-        user.id,
-        user.username
-    ):
-
-        users = all_users()
-        sent = 0
-
-        for uid in users:
-
-            try:
-
-                await context.bot.send_message(
-                    uid,
-                    f"📢 *RJ Team Announcement*\n\n{text}",
-                    parse_mode="Markdown",
-                )
-
-                sent += 1
-
-            except Exception:
-                pass
-
-        context.user_data.clear()
-
-        await update.message.reply_text(
-            f"""
-✅ Broadcast সম্পন্ন হয়েছে।
-
-👥 Sent: {sent}
-"""
-        )
-        return
-
-    # -----------------------------------------------------
-    # CHANGE PRICE
-    # -----------------------------------------------------
-
-    if step == "price" and is_admin(
-        user.id,
-        user.username
-    ):
-
-        try:
-
-            price = float(text)
-
-            if price < 0:
-                raise ValueError
-
-        except ValueError:
-
-            await update.message.reply_text(
-                "❌ সঠিক Price দিন।\n"
-                "উদাহরণ: `150`",
-                parse_mode="Markdown",
-            )
-            return
-
-        sid = context.user_data.get("price_service")
-
-        change_price(sid, price)
-
-        context.user_data.clear()
-
-        await update.message.reply_text(
-            f"✅ Price ৳{price:g} করা হয়েছে।"
-        )
-        return
-
-    # -----------------------------------------------------
-    # STATUS
-    # -----------------------------------------------------
-
-    if step == "status":
-
-        if not text.isdigit():
-
-            await update.message.reply_text(
-                "❌ সঠিক Order ID দিন।"
-            )
-            return
-
-        oid = int(text)
-        order = get_order(oid)
-
-        if not order:
-
-            await update.message.reply_text(
-                "❌ Order পাওয়া যায়নি।"
-            )
-            return
-
-        if (
-            order[1] != user.id
-            and not is_admin(
-                user.id,
-                user.username
-            )
-        ):
-
-            await update.message.reply_text(
-                "❌ এই Order আপনার নয়।"
-            )
-            return
-
-        context.user_data.clear()
-
-        await update.message.reply_text(
-            f"""
-🔎 *Order Status*
-
-🆔 Order: `#{order[0]}`
-📱 Service: {order[3]}
-🔗 Link: {order[4]}
-🔢 Quantity: {order[5]}
-
-💳 Payment: {order[6]}
-🧾 Transaction: `{order[7]}`
-
-📊 Status: *{order[8]}*
-🕐 {order[9]}
-""",
-            parse_mode="Markdown",
-        )
-        return
-
-    # -----------------------------------------------------
-    # LINK
-    # -----------------------------------------------------
-
-    if step == "link":
-
-        context.user_data["link"] = text
-        context.user_data["step"] = "quantity"
-
-        await update.message.reply_text(
-            "🔢 এখন Quantity লিখুন।\n\n"
-            "উদাহরণ: `100`",
-            parse_mode="Markdown",
-        )
-        return
-
-    # -----------------------------------------------------
-    # QUANTITY
-    # -----------------------------------------------------
-
-    if step == "quantity":
-
-        if not text.isdigit() or int(text) <= 0:
-
-            await update.message.reply_text(
-                "❌ Quantity হিসেবে সঠিক সংখ্যা দিন।"
-            )
-            return
-
-        context.user_data["quantity"] = int(text)
-        context.user_data["step"] = "payment"
-
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "🟣 bKash",
-                    callback_data="pay_bkash"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🟢 Nagad",
-                    callback_data="pay_nagad"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🔵 Rocket",
-                    callback_data="pay_rocket"
-                )
-            ],
-        ]
-
-        await update.message.reply_text(
-            "💳 Payment Method নির্বাচন করুন:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-        return
-
-    # -----------------------------------------------------
-    # TRANSACTION
-    # -----------------------------------------------------
-
-    if step == "transaction":
-
-        transaction = text
-
-        service = context.user_data.get("service")
-        link = context.user_data.get("link")
-        quantity = context.user_data.get("quantity")
-        payment = context.user_data.get("payment")
-
-        if not all([
-            service,
-            link,
-            quantity,
-            payment
-        ]):
-
-            context.user_data.clear()
-
-            await update.message.reply_text(
-                "❌ Order session শেষ হয়ে গেছে। "
-                "/start দিয়ে আবার চেষ্টা করুন।"
-            )
-            return
-
-        oid = create_order(
-            user,
-            service,
-            link,
-            quantity,
-            payment,
-            transaction,
-        )
-
-        await update.message.reply_text(
-            f"""
-✅ *Order Submitted*
-
-🆔 Order ID: `#{oid}`
-
-📱 Service: {service}
-🔢 Quantity: {quantity}
-💳 Payment: {payment}
-
-🧾 Transaction ID:
-`{transaction}`
-
-📊 Status: *Pending Verification*
-""",
-            parse_mode="Markdown",
-        )
-
-        # ADMIN NOTIFICATION
-        try:
-
-            await context.bot.send_message(
-                ADMIN_ID,
-                f"""
-🔔 *New Order*
-
-🆔 Order: `#{oid}`
-
-👤 @{user.username or 'N/A'}
-🆔 User ID: `{user.id}`
-
-📱 {service}
-🔗 {link}
-🔢 Quantity: {quantity}
-
-💳 {payment}
-🧾 `{transaction}`
-
-📊 Pending Verification
-""",
-                parse_mode="Markdown",
-            )
-
-        except Exception as e:
-            logging.error(
-                "Admin notification error: %s",
-                e
-            )
-
-        context.user_data.clear()
-        return
-
-    await update.message.reply_text(
-        "🏠 Main Menu দেখতে /start লিখুন।"
-    )
-
-
-# =========================================================
-# PAYMENT HANDLER
-# =========================================================
-
-async def payment_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    query = update.callback_query
-    await query.answer()
-
-    method = query.data.replace("pay_", "")
-
-    names = {
-        "bkash": "bKash",
-        "nagad": "Nagad",
-        "rocket": "Rocket",
-    }
-
-    numbers = {
-        "bkash": BKASH_NUMBER,
-        "nagad": NAGAD_NUMBER,
-        "rocket": ROCKET_NUMBER,
-    }
-
-    context.user_data["payment"] = names[method]
-    context.user_data["step"] = "transaction"
-
-    await query.edit_message_text(
-        f"""
-💳 *{names[method]} Payment*
-
-📱 Number:
-`{numbers[method]}`
-
-Payment করার পর Transaction ID পাঠান।
-""",
-        parse_mode="Markdown",
-    )
-
-
-# =========================================================
-# CALLBACK MASTER
-# =========================================================
-
-async def master_callback(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    data = update.callback_query.data
-
-    if data.startswith("pay_"):
-        await payment_handler(update, context)
-    else:
-        await callback_router(update, context)
-
-
-# =========================================================
-# MAIN
-# =========================================================
-
-def main():
-
-    if BOT_TOKEN == "YOUR_BOT_TOKEN":
+    except Exception as e:
 
         print(
-            "❌ BOT_TOKEN সেট করা হয়নি। "
-            "GitHub Secret-এ BOT_TOKEN দিন।"
+            "ADMIN CHECK ERROR:",
+            repr(e)
+        )
+
+        return False
+
+
+# ============================================================
+# WELCOME NEW MEMBERS
+# ============================================================
+
+async def welcome_new_member(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not update.chat_member:
+        return
+
+    chat_member = update.chat_member
+
+    old_status = (
+        chat_member.old_chat_member.status
+    )
+
+    new_status = (
+        chat_member.new_chat_member.status
+    )
+
+    joined_statuses = [
+        ChatMemberStatus.MEMBER,
+        ChatMemberStatus.RESTRICTED
+    ]
+
+    if new_status not in joined_statuses:
+        return
+
+    if old_status in joined_statuses:
+        return
+
+    user = chat_member.new_chat_member.user
+
+    name = user.first_name or "বন্ধু"
+
+    welcome_text = (
+        f"👋 স্বাগতম {name}! 🌸\n\n"
+        f"🇧🇩 {COMMUNITY_NAME}-এ আপনাকে স্বাগতম!\n\n"
+        "🤝 আশা করি আপনি আমাদের সাথে সুন্দরভাবে সময় কাটাবেন।\n"
+        "💬 সবাইকে সম্মান করুন এবং সুন্দর ভাষায় কথা বলুন।\n\n"
+        "📜 আমাদের Group Rules ও Islamic Notice নিচে দেওয়া হলো 👇"
+    )
+
+    try:
+
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=welcome_text
+        )
+
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=GROUP_NOTICE
+        )
+
+    except Exception as e:
+
+        print(
+            "WELCOME ERROR:",
+            repr(e)
+        )
+
+
+# ============================================================
+# ANTI ABUSE
+# ============================================================
+
+async def anti_abuse(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not update.message:
+        return
+
+    if not update.message.text:
+        return
+
+    if update.effective_chat.type not in [
+        "group",
+        "supergroup"
+    ]:
+        return
+
+    user = update.effective_user
+
+    if not user:
+        return
+
+    # Never punish admins
+    if await is_admin(update, context):
+        return
+
+    text = update.message.text
+
+    if not contains_bad_language(text):
+        return
+
+    user_id = user.id
+
+    warnings = context.application.bot_data.setdefault(
+        "bad_language_warnings",
+        {}
+    )
+
+    key = (
+        update.effective_chat.id,
+        user_id
+    )
+
+    warnings[key] = warnings.get(key, 0) + 1
+
+    count = warnings[key]
+
+    # Delete bad message
+    try:
+
+        await update.message.delete()
+
+    except Exception as e:
+
+        print(
+            "DELETE ERROR:",
+            repr(e)
+        )
+
+    # First warning
+    if count == 1:
+
+        await context.bot.send_message(
+
+            chat_id=update.effective_chat.id,
+
+            text=(
+                f"⚠️ সতর্কবার্তা!\n\n"
+                f"👤 {user.first_name}\n\n"
+                "❌ Group-এ গালাগালি বা অশালীন ভাষা ব্যবহার করা যাবে না।\n"
+                "🌸 দয়া করে ভদ্র ও সম্মানজনক ভাষায় কথা বলুন।\n\n"
+                "📌 আর একবার এমন হলে আপনাকে Group থেকে Kick করা হবে।"
+            )
         )
 
         return
 
-    init_db()
+    # Second offense → Kick
+    if count >= 2:
 
-    app = Application.builder().token(
-        BOT_TOKEN
-    ).build()
+        try:
 
-    # Only /start command
-    app.add_handler(
-        CommandHandler("start", start)
+            await context.bot.ban_chat_member(
+                chat_id=update.effective_chat.id,
+                user_id=user_id
+            )
+
+            await context.bot.unban_chat_member(
+                chat_id=update.effective_chat.id,
+                user_id=user_id,
+                only_if_banned=True
+            )
+
+            await context.bot.send_message(
+
+                chat_id=update.effective_chat.id,
+
+                text=(
+                    "🚫 Group থেকে Kick করা হয়েছে\n\n"
+                    f"👤 User: {user.first_name}\n\n"
+                    "⚠️ একই ধরনের খারাপ ভাষা দ্বিতীয়বার ব্যবহার করা হয়েছে।\n"
+                    "🌸 আমাদের Group-এ ভদ্র ও সম্মানজনক আচরণ বজায় রাখুন।\n\n"
+                    "🤲 আল্লাহ আমাদের সবাইকে সুন্দর কথা বলার তাওফিক দিন।"
+                )
+            )
+
+            warnings.pop(key, None)
+
+        except Exception as e:
+
+            print(
+                "KICK ERROR:",
+                repr(e)
+            )
+
+            await context.bot.send_message(
+
+                chat_id=update.effective_chat.id,
+
+                text=(
+                    "⚠️ খারাপ ভাষা শনাক্ত হয়েছে।\n\n"
+                    "❌ User-কে Kick করতে Bot-এর প্রয়োজনীয় Admin permission নেই।\n"
+                    "🛡️ Bot-কে Group Admin করে প্রয়োজনীয় permission দিন।"
+                )
+            )
+
+
+# ============================================================
+# START
+# ============================================================
+
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    await update.message.reply_text(
+
+        "👋 আসসালামু আলাইকুম! 🌸\n\n"
+
+        "🤖 আমি RJ Team Bot\n\n"
+
+        "💬 আপনি আমাকে যেকোনো প্রশ্ন করতে পারেন।\n"
+        "🇧🇩 আমি সাধারণভাবে বাংলায় উত্তর দেব।\n\n"
+
+        "✨ প্রশ্নের বিষয় অনুযায়ী সুন্দর ও উপযুক্ত Emoji ব্যবহার করব।\n\n"
+
+        "🌐 প্রতিটি AI উত্তরের নিচে Translate বাটন থাকবে।\n\n"
+
+        "🚀 শুরু করতে আপনার প্রশ্ন লিখে Send করুন।"
     )
 
-    app.add_handler(
-        CallbackQueryHandler(master_callback)
+
+# ============================================================
+# HELP
+# ============================================================
+
+async def help_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    await update.message.reply_text(
+
+        "🤖 RJ Team Bot Help\n\n"
+
+        "💬 যেকোনো প্রশ্ন সরাসরি লিখুন\n"
+        "🇧🇩 উত্তর সাধারণভাবে বাংলায় পাবেন\n"
+        "✨ প্রশ্ন অনুযায়ী সুন্দর Emoji থাকবে\n"
+        "🌐 Translate দিয়ে বিভিন্ন ভাষায় অনুবাদ করতে পারবেন\n\n"
+
+        "📌 Commands:\n\n"
+
+        "▶️ /start — Bot চালু\n"
+        "▶️ /help — Help\n"
+        "▶️ /about — Bot সম্পর্কে\n"
+        "▶️ /owners — Team Information\n"
+        "▶️ /reset — Conversation memory reset"
     )
 
+
+# ============================================================
+# ABOUT
+# ============================================================
+
+async def about(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    await update.message.reply_text(
+
+        "🤖 RJ Team Bot\n\n"
+
+        f"🏠 Community: {COMMUNITY_NAME}\n"
+        f"👤 Creator: {CREATOR_NAME}\n\n"
+
+        f"👑 Owner: {OWNER_USERNAME}\n"
+        f"🤝 Partner: {PARTNER_USERNAME}\n"
+        f"🛠️ Assistant: {ASSISTANT_USERNAME}\n\n"
+
+        f"🎵 TikTok: {TIKTOK_USERNAME}\n"
+        f"▶️ YouTube: {YOUTUBE_LINK}\n\n"
+
+        "🇧🇩 RJ Team Bangladesh Community\n"
+        "✨ Smart • Friendly • Helpful"
+    )
+
+
+# ============================================================
+# OWNERS
+# ============================================================
+
+async def owners(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    keyboard = InlineKeyboardMarkup([
+
+        [
+            InlineKeyboardButton(
+                "👑 Owner",
+                url="https://t.me/RJteam1"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "🤝 Partner",
+                url="https://t.me/Apple20237"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "🛠️ Assistant",
+                url="https://t.me/Apple20237"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "▶️ YouTube",
+                url=YOUTUBE_LINK
+            )
+        ]
+    ])
+
+    await update.message.reply_text(
+
+        "👑 RJ Team Team Information\n\n"
+
+        f"👑 Owner: {OWNER_USERNAME}\n"
+        f"🤝 Partner: {PARTNER_USERNAME}\n"
+        f"🛠️ Assistant: {ASSISTANT_USERNAME}\n\n"
+
+        f"🎵 Owner TikTok: {TIKTOK_USERNAME}\n"
+        f"▶️ Owner YouTube: {YOUTUBE_LINK}\n\n"
+
+        f"🤖 Created by: {COMMUNITY_NAME}\n"
+        f"👤 Creator: {CREATOR_NAME}\n\n"
+
+        "✨ RJ Team-এর পক্ষ থেকে আপনাকে স্বাগতম! 🇧🇩",
+
+        reply_markup=keyboard
+    )
+
+
+# ============================================================
+# RESET
+# ============================================================
+
+async def reset(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    context.user_data["history"] = []
+
+    await update.message.reply_text(
+
+        "🧹 Conversation memory reset করা হয়েছে।\n\n"
+        "✨ এখন নতুন করে কথা বলতে পারেন।"
+    )
+
+
+# ============================================================
+# CREATOR QUESTION
+# ============================================================
+
+def is_creator_question(text):
+
+    text = text.lower().strip()
+
+    keywords = [
+
+        "আপনাকে কে বানিয়েছে",
+        "কে বানিয়েছে",
+        "কে তৈরি করেছে",
+        "কে তোমাকে বানিয়েছে",
+        "কে তোমাকে তৈরি করেছে",
+        "তোমাকে কে বানিয়েছে",
+        "তোমাকে কে তৈরি করেছে",
+
+        "who made you",
+        "who created you",
+        "who built you",
+        "who is your creator",
+        "who created this bot",
+
+        "bot কে বানিয়েছে",
+        "bot কে তৈরি করেছে",
+        "creator কে"
+    ]
+
+    return any(
+        keyword in text
+        for keyword in keywords
+    )
+
+
+def creator_answer():
+
+    return (
+
+        "🤖 আমাকে তৈরি করেছে RJ Team Bangladesh Community 🇧🇩\n\n"
+
+        "👤 Creator: Rakib Sar\n"
+        "👑 Owner: @RJteam1\n"
+        "🤝 Partner: @Apple20237\n"
+        "🛠️ Assistant: @Apple20237\n\n"
+
+        "🎵 TikTok: lyrics.song333\n"
+        "▶️ YouTube: https://youtube.com/@rakib22\n\n"
+
+        "✨ আমি RJ Team-এর AI Assistant।"
+    )
+
+
+# ============================================================
+# AI RESPONSE
+# ============================================================
+
+async def ai_reply(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not update.message:
+        return
+
+    if not update.message.text:
+        return
+
+    user_text = update.message.text.strip()
+
+    if not user_text:
+        return
+
+    # Do not send abusive messages to AI
+    if (
+        update.effective_chat
+        and update.effective_chat.type in [
+            "group",
+            "supergroup"
+        ]
+        and contains_bad_language(user_text)
+    ):
+        return
+
+    # Creator question
+    if is_creator_question(user_text):
+
+        answer = creator_answer()
+
+        sent = await update.message.reply_text(
+            answer,
+            reply_markup=translate_keyboard()
+        )
+
+        context.user_data["last_answer"] = answer
+        context.user_data["last_message_id"] = sent.message_id
+
+        return
+
+    # Conversation history
+    history = context.user_data.setdefault(
+        "history",
+        []
+    )
+
+    history.append({
+        "role": "user",
+        "content": user_text
+    })
+
+    if len(history) > 20:
+        history[:] = history[-20:]
+
+    try:
+
+        response = await client.responses.create(
+
+            model=OPENAI_MODEL,
+
+            instructions=(
+
+                "You are RJ Team Bot, a helpful, friendly and smart "
+                "Telegram AI assistant. "
+
+                "IMPORTANT LANGUAGE RULE: "
+                "Always answer in natural Bangla/Bengali by default, "
+                "even when the user asks in English or Banglish. "
+
+                "Only use another language when the user explicitly "
+                "requests another language. "
+
+                "Make answers easy to understand and useful. "
+
+                "Use beautiful and relevant emojis according to "
+                "the topic and mood of the user's message. "
+
+                "Do NOT use too many emojis. "
+                "Do NOT put random emojis everywhere. "
+
+                "Use short paragraphs, headings and bullet points "
+                "when they improve readability. "
+
+                "Be accurate, helpful, friendly and concise. "
+
+                "If asked who created, made, built or owns this bot, "
+                "give the following information: "
+
+                "Created by RJ Team Bangladesh Community. "
+                "Creator: Rakib Sar. "
+                "Owner: @RJteam1. "
+                "Partner: @Apple20237. "
+                "Assistant: @Apple20237. "
+                "TikTok: lyrics.song333. "
+                "YouTube: https://youtube.com/@rakib22. "
+
+                "Do not describe anyone as the owner unless "
+                "the user specifically asks for the owner."
+            ),
+
+            input=history
+        )
+
+        answer = response.output_text.strip()
+
+        if not answer:
+
+            answer = (
+                "😔 দুঃখিত, এখন কোনো উত্তর পাওয়া যায়নি।"
+            )
+
+        history.append({
+            "role": "assistant",
+            "content": answer
+        })
+
+        context.user_data["last_answer"] = answer
+
+        # Telegram message limit
+        for i in range(
+            0,
+            len(answer),
+            4000
+        ):
+
+            chunk = answer[i:i + 4000]
+
+            sent = await update.message.reply_text(
+                chunk,
+                reply_markup=translate_keyboard()
+            )
+
+            context.user_data[
+                "last_message_id"
+            ] = sent.message_id
+
+    except Exception as e:
+
+        print(
+            "AI ERROR:",
+            repr(e)
+        )
+
+        await update.message.reply_text(
+
+            "❌ দুঃখিত, AI উত্তর দিতে সমস্যা হচ্ছে।\n"
+            "⏳ একটু পরে আবার চেষ্টা করুন।"
+        )
+
+
+# ============================================================
+# TRANSLATE MENU
+# ============================================================
+
+async def translate_button(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    query = update.callback_query
+
+    await query.answer()
+
+    await query.message.reply_text(
+
+        "🌐 কোন ভাষায় Translate করতে চান?\n\n"
+        "👇 আপনার পছন্দের ভাষায় চাপ দিন।",
+
+        reply_markup=language_keyboard()
+    )
+
+
+# ============================================================
+# TRANSLATE
+# ============================================================
+
+async def translate_text(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    query = update.callback_query
+
+    await query.answer()
+
+    language = query.data.replace(
+        "lang_",
+        ""
+    )
+
+    answer = context.user_data.get(
+        "last_answer"
+    )
+
+    if not answer:
+
+        await query.message.reply_text(
+
+            "❌ Translate করার মতো কোনো "
+            "সাম্প্রতিক উত্তর পাওয়া যায়নি।"
+        )
+
+        return
+
+    try:
+
+        response = await client.responses.create(
+
+            model=OPENAI_MODEL,
+
+            instructions=(
+
+                f"Translate the following text accurately "
+                f"into {language}. "
+
+                "Keep the original meaning and important details. "
+
+                "Do not add extra information. "
+
+                "Make the translation natural and easy to understand."
+            ),
+
+            input=answer
+        )
+
+        translated = response.output_text.strip()
+
+        if not translated:
+
+            translated = (
+                "❌ Translation পাওয়া যায়নি।"
+            )
+
+        await query.message.reply_text(
+
+            f"🌐 {language} Translation\n\n"
+            f"{translated}"
+        )
+
+    except Exception as e:
+
+        print(
+            "TRANSLATE ERROR:",
+            repr(e)
+        )
+
+        await query.message.reply_text(
+
+            "❌ Translation করতে সমস্যা হয়েছে.\n"
+            "⏳ একটু পরে চেষ্টা করুন।"
+        )
+
+
+# ============================================================
+# CLOSE TRANSLATE
+# ============================================================
+
+async def close_translate(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    query = update.callback_query
+
+    await query.answer()
+
+    try:
+
+        await query.message.delete()
+
+    except Exception:
+
+        await query.message.edit_text(
+            "❌ Translate menu বন্ধ করা হয়েছে।"
+        )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+async def main():
+
+    # Start Render health server
+    Thread(
+        target=start_health_server,
+        daemon=True
+    ).start()
+
+    # Create Telegram application
+    app = (
+        Application
+        .builder()
+        .token(BOT_TOKEN)
+        .build()
+    )
+
+    # ========================================================
+    # COMMANDS
+    # ========================================================
+
     app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            text_handler
+        CommandHandler(
+            "start",
+            start
         )
     )
 
-    print("🤖 RJ Team Bot Running...")
-
-    app.run_polling(
-        drop_pending_updates=True
+    app.add_handler(
+        CommandHandler(
+            "help",
+            help_command
+        )
     )
 
+    app.add_handler(
+        CommandHandler(
+            "about",
+            about
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "owners",
+            owners
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "reset",
+            reset
+        )
+    )
+
+    # ========================================================
+    # NEW MEMBER WELCOME
+    # ========================================================
+
+    app.add_handler(
+
+        ChatMemberHandler(
+            welcome_new_member,
+            ChatMemberHandler.CHAT_MEMBER
+        )
+    )
+
+    # ========================================================
+    # ANTI ABUSE
+    # ========================================================
+
+    app.add_handler(
+
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            anti_abuse,
+            block=False
+        )
+    )
+
+    # ========================================================
+    # TRANSLATE BUTTON
+    # ========================================================
+
+    app.add_handler(
+
+        CallbackQueryHandler(
+            translate_button,
+            pattern="^translate$"
+        )
+    )
+
+    app.add_handler(
+
+        CallbackQueryHandler(
+            translate_text,
+            pattern="^lang_"
+        )
+    )
+
+    app.add_handler(
+
+        CallbackQueryHandler(
+            close_translate,
+            pattern="^close_translate$"
+        )
+    )
+
+    # ========================================================
+    # AI NORMAL TEXT
+    # ========================================================
+
+    app.add_handler(
+
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            ai_reply,
+            block=False
+        )
+    )
+
+    print(
+        "RJ Team Bot is running..."
+    )
+
+    # ========================================================
+    # START BOT
+    # ========================================================
+
+    await app.initialize()
+
+    await app.start()
+
+    await app.updater.start_polling()
+
+    try:
+
+        await asyncio.Event().wait()
+
+    finally:
+
+        await app.updater.stop()
+
+        await app.stop()
+
+        await app.shutdown()
+
+
+# ============================================================
+# RUN
+# ============================================================
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
