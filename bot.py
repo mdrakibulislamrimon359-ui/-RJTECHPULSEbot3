@@ -1,12 +1,15 @@
 import os
 import logging
-from openai import AsyncOpenAI
+
+from google import genai
+from google.genai import types
 
 from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
 )
+
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -16,20 +19,30 @@ from telegram.ext import (
     filters,
 )
 
+
 # =========================================================
 # CONFIG
 # =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is missing")
 
-if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY is missing")
+if not GEMINI_API_KEY:
+    raise RuntimeError("GEMINI_API_KEY is missing")
 
-client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+
+# Gemini client
+client = genai.Client(api_key=GEMINI_API_KEY)
+
+MODEL = "gemini-2.5-flash"
+
+
+# =========================================================
+# LOGGING
+# =========================================================
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -120,10 +133,50 @@ Banglish হলে প্রয়োজন অনুযায়ী Banglish/বা�
 
 
 # =========================================================
+# GEMINI GENERATE
+# =========================================================
+
+async def generate_gemini(prompt, system_instruction=None):
+
+    try:
+
+        config = types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            max_output_tokens=500,
+            temperature=0.9,
+        )
+
+        response = await client.aio.models.generate_content(
+            model=MODEL,
+            contents=prompt,
+            config=config,
+        )
+
+        answer = (response.text or "").strip()
+
+        if not answer:
+            return None
+
+        return answer
+
+    except Exception as e:
+
+        logger.exception(
+            "Gemini API error: %s",
+            e
+        )
+
+        return None
+
+
+# =========================================================
 # START
 # =========================================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     keyboard = [
         [
@@ -217,30 +270,19 @@ async def about_command(
 
 async def ai_reply(text):
 
-    try:
+    answer = await generate_gemini(
+        prompt=text,
+        system_instruction=SYSTEM_PROMPT,
+    )
 
-        response = await client.responses.create(
-            model="gpt-5-mini",
-            instructions=SYSTEM_PROMPT,
-            input=text,
-            max_output_tokens=500,
-        )
-
-        answer = response.output_text.strip()
-
-        if not answer:
-            return "😅 আবার SMS টা পাঠাও তো ❤️"
-
-        return answer
-
-    except Exception as e:
-
-        logger.exception("OpenAI error: %s", e)
+    if not answer:
 
         return (
-            "😅 একটু সমস্যা হয়েছে!\n"
+            "😅 এখন AI থেকে উত্তর পাওয়া যাচ্ছে না!\n"
             "কিছুক্ষণ পরে আবার চেষ্টা করো ❤️"
         )
+
+    return answer
 
 
 # =========================================================
@@ -249,9 +291,7 @@ async def ai_reply(text):
 
 async def translate_text(text):
 
-    try:
-
-        prompt = f"""
+    prompt = f"""
 Translate the following text naturally.
 
 Automatically detect the source language.
@@ -262,31 +302,27 @@ translate into Bangla.
 If a target language is explicitly mentioned,
 translate into that language.
 
-Return only the translated text.
+Return ONLY the translated text.
+
 Do not explain.
+Do not add quotation marks.
 
 Text:
 {text}
 """
 
-        response = await client.responses.create(
-            model="gpt-5-mini",
-            input=prompt,
-            max_output_tokens=500,
-        )
+    result = await generate_gemini(
+        prompt=prompt,
+        system_instruction=(
+            "You are a professional translation assistant. "
+            "Return only the requested translation."
+        ),
+    )
 
-        result = response.output_text.strip()
-
-        if not result:
-            return "❌ Translation পাওয়া যায়নি।"
-
-        return result
-
-    except Exception as e:
-
-        logger.exception("Translation error: %s", e)
-
+    if not result:
         return "❌ Translation করতে সমস্যা হয়েছে।"
+
+    return result
 
 
 # =========================================================
@@ -335,7 +371,10 @@ async def button_handler(
 
     await query.answer()
 
-    # About button
+    # -----------------------------------------------------
+    # ABOUT
+    # -----------------------------------------------------
+
     if query.data == "about":
 
         keyboard = [
@@ -359,7 +398,11 @@ async def button_handler(
 
         return
 
-    # Translate help button
+
+    # -----------------------------------------------------
+    # TRANSLATE HELP
+    # -----------------------------------------------------
+
     if query.data == "translate_help":
 
         await query.message.reply_text(
@@ -371,21 +414,6 @@ async def button_handler(
         )
 
         return
-
-    # Translate reply button
-    if query.data.startswith("translate_reply:"):
-
-        original_text = query.data.replace(
-            "translate_reply:",
-            "",
-            1
-        )
-
-        result = await translate_text(original_text)
-
-        await query.message.reply_text(
-            "🌐 Translation:\n\n" + result
-        )
 
 
 # =========================================================
@@ -415,8 +443,7 @@ async def handle_message(
 
     answer = await ai_reply(text)
 
-    # Telegram callback_data has a small size limit.
-    # Therefore use a short token stored in user context.
+    # Save last AI reply
     context.user_data["last_ai_reply"] = answer
 
     keyboard = [
@@ -448,12 +475,16 @@ async def translate_last(
 
     await query.answer()
 
-    text = context.user_data.get("last_ai_reply")
+    text = context.user_data.get(
+        "last_ai_reply"
+    )
 
     if not text:
+
         await query.message.reply_text(
             "❌ আগের reply পাওয়া যাচ্ছে না।"
         )
+
         return
 
     result = await translate_text(text)
@@ -490,24 +521,44 @@ def main():
         .build()
     )
 
-    # Commands
+
+    # -----------------------------------------------------
+    # COMMANDS
+    # -----------------------------------------------------
+
     application.add_handler(
-        CommandHandler("start", start)
+        CommandHandler(
+            "start",
+            start
+        )
     )
 
     application.add_handler(
-        CommandHandler("help", help_command)
+        CommandHandler(
+            "help",
+            help_command
+        )
     )
 
     application.add_handler(
-        CommandHandler("about", about_command)
+        CommandHandler(
+            "about",
+            about_command
+        )
     )
 
     application.add_handler(
-        CommandHandler("translate", translate_command)
+        CommandHandler(
+            "translate",
+            translate_command
+        )
     )
 
-    # Buttons
+
+    # -----------------------------------------------------
+    # BUTTONS
+    # -----------------------------------------------------
+
     application.add_handler(
         CallbackQueryHandler(
             translate_last,
@@ -518,11 +569,15 @@ def main():
     application.add_handler(
         CallbackQueryHandler(
             button_handler,
-            pattern="^(about|translate_help|translate_reply:)"
+            pattern="^(about|translate_help)$"
         )
     )
 
-    # Messages
+
+    # -----------------------------------------------------
+    # MESSAGES
+    # -----------------------------------------------------
+
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
@@ -530,20 +585,31 @@ def main():
         )
     )
 
-    # Errors
-    application.add_error_handler(error_handler)
+
+    # -----------------------------------------------------
+    # ERROR
+    # -----------------------------------------------------
+
+    application.add_error_handler(
+        error_handler
+    )
+
 
     # =====================================================
     # RENDER WEBHOOK
     # =====================================================
 
     port = int(
-        os.getenv("PORT", "10000")
+        os.getenv(
+            "PORT",
+            "10000"
+        )
     )
 
     render_url = os.getenv(
         "RENDER_EXTERNAL_URL"
     )
+
 
     if render_url:
 
@@ -565,6 +631,7 @@ def main():
             drop_pending_updates=True,
             allowed_updates=Update.ALL_TYPES,
         )
+
 
     else:
 
