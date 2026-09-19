@@ -40,11 +40,38 @@ logger = logging.getLogger(__name__)
 
 
 # =========================================================
+# BOT INFORMATION
+# =========================================================
+
+ABOUT_TEXT = """
+🤖 About AI Assistant
+
+আমি তোমার AI Assistant। ❤️
+
+আমি RJ Team Bangladesh Hacker Community-এর পক্ষ থেকে
+তোমার বন্ধু হিসেবে তোমার বিভিন্ন প্রশ্নের উত্তর দেওয়ার চেষ্টা করি। 😊
+
+💬 সাধারণ প্রশ্ন → সুন্দর উত্তর
+😂 মজার SMS → মজার reply
+❤️ Emotional SMS → emotional reply
+🌐 Translation → যেকোনো ভাষার অনুবাদ
+
+👑 Owner: @RJteam1
+📢 Channel: @RJteam123890
+
+🤝 RJ Team Bangladesh Hacker Community
+"""
+
+
+# =========================================================
 # AI PERSONALITY
 # =========================================================
 
 SYSTEM_PROMPT = """
 তুমি একটি বন্ধুসুলভ Telegram AI assistant।
+
+তুমি RJ Team Bangladesh Hacker Community-এর পক্ষ থেকে
+ব্যবহারকারীর সাথে বন্ধুর মতো কথা বলবে।
 
 ব্যবহারকারীর SMS-এর ধরন বুঝে উত্তর দেবে।
 
@@ -86,9 +113,8 @@ Banglish হলে প্রয়োজন অনুযায়ী Banglish/বা�
 15. গুরুতর বিষয়ে মজা করবে না।
 
 16. ব্যবহারকারীর মূল বক্তব্য বুঝে reply করবে।
-শুধু keyword দেখে উত্তর দেবে না।
 
-17. ব্যবহারকারী translation চাইলে শুধু translation-এর কাজ করবে।
+17. Translation চাইলে শুধু translation করবে।
 অপ্রয়োজনীয় explanation দেবে না।
 """
 
@@ -99,15 +125,39 @@ Banglish হলে প্রয়োজন অনুযায়ী Banglish/বা�
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "ℹ️ About",
+                callback_data="about"
+            ),
+            InlineKeyboardButton(
+                "🌐 Translate",
+                callback_data="translate_help"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "📢 Channel",
+                url="https://t.me/RJteam123890"
+            ),
+            InlineKeyboardButton(
+                "👑 Owner",
+                url="https://t.me/RJteam1"
+            ),
+        ],
+    ]
+
     await update.message.reply_text(
         "👋 হ্যালো বন্ধু! ❤️\n\n"
-        "আমাকে যেকোনো SMS পাঠাও।\n\n"
-        "😂 মজার SMS → মজার reply\n"
-        "❤️ Emotional SMS → emotional reply\n"
-        "🤔 প্রশ্ন → সুন্দর উত্তর\n"
-        "🌐 Translate → যেকোনো ভাষায় অনুবাদ\n\n"
-        "📝 Translate করতে:\n"
-        "/translate Hello, how are you?"
+        "আমি তোমার AI Assistant। 🤖\n\n"
+        "💬 যেকোনো SMS পাঠাও।\n"
+        "😂 মজার হলে মজার reply\n"
+        "❤️ Emotional হলে emotional reply\n"
+        "🤔 প্রশ্ন হলে সুন্দর উত্তর\n"
+        "🌐 Translation-ও করা যাবে।\n\n"
+        "নিচের Button ব্যবহার করতে পারো 👇",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
@@ -115,7 +165,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # HELP
 # =========================================================
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def help_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     await update.message.reply_text(
         "🤖 Bot Help\n\n"
@@ -123,15 +176,43 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "😂 মজার হলে মজার reply\n"
         "❤️ Emotional হলে emotional reply\n"
         "🤔 প্রশ্ন হলে উত্তর\n"
-        "🌐 Translate করতে:\n"
-        "/translate Your text\n\n"
-        "উদাহরণ:\n"
-        "/translate I love you ❤️"
+        "🌐 Translate করতে:\n\n"
+        "/translate Hello, how are you?\n\n"
+        "ℹ️ About দেখতে /about ব্যবহার করো।"
     )
 
 
 # =========================================================
-# OPENAI AI REPLY
+# ABOUT COMMAND
+# =========================================================
+
+async def about_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "👑 Owner",
+                url="https://t.me/RJteam1"
+            ),
+            InlineKeyboardButton(
+                "📢 Channel",
+                url="https://t.me/RJteam123890"
+            ),
+        ]
+    ]
+
+    await update.message.reply_text(
+        ABOUT_TEXT,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        disable_web_page_preview=True,
+    )
+
+
+# =========================================================
+# AI REPLY
 # =========================================================
 
 async def ai_reply(text):
@@ -175,14 +256,14 @@ Translate the following text naturally.
 
 Automatically detect the source language.
 
-If the user did not specify a target language,
-translate it into Bangla.
+If no target language is specified,
+translate into Bangla.
 
-If the user explicitly says a target language,
+If a target language is explicitly mentioned,
 translate into that language.
 
-Do not explain.
 Return only the translated text.
+Do not explain.
 
 Text:
 {text}
@@ -222,8 +303,7 @@ async def translate_command(
         await update.message.reply_text(
             "🌐 Translate ব্যবহার করার নিয়ম:\n\n"
             "/translate Hello, how are you?\n\n"
-            "বাংলা চাইলে:\n"
-            "/translate I love you ❤️"
+            "উত্তর বাংলায় পাওয়া যাবে। ❤️"
         )
 
         return
@@ -243,10 +323,10 @@ async def translate_command(
 
 
 # =========================================================
-# TRANSLATE BUTTON
+# BUTTON HANDLER
 # =========================================================
 
-async def translate_button(
+async def button_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
@@ -255,17 +335,57 @@ async def translate_button(
 
     await query.answer()
 
-    original_text = query.message.text
+    # About button
+    if query.data == "about":
 
-    # Remove previous bot prefix if present
-    if original_text.startswith("🤖"):
-        original_text = original_text[2:].strip()
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "👑 Owner",
+                    url="https://t.me/RJteam1"
+                ),
+                InlineKeyboardButton(
+                    "📢 Channel",
+                    url="https://t.me/RJteam123890"
+                ),
+            ]
+        ]
 
-    result = await translate_text(original_text)
+        await query.message.reply_text(
+            ABOUT_TEXT,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            disable_web_page_preview=True,
+        )
 
-    await query.message.reply_text(
-        "🌐 Translation:\n\n" + result
-    )
+        return
+
+    # Translate help button
+    if query.data == "translate_help":
+
+        await query.message.reply_text(
+            "🌐 Translate\n\n"
+            "যেকোনো ভাষার লেখা translate করতে পারো।\n\n"
+            "উদাহরণ:\n"
+            "/translate Hello, how are you?\n\n"
+            "ডিফল্টভাবে বাংলা translation দেওয়া হবে। ❤️"
+        )
+
+        return
+
+    # Translate reply button
+    if query.data.startswith("translate_reply:"):
+
+        original_text = query.data.replace(
+            "translate_reply:",
+            "",
+            1
+        )
+
+        result = await translate_text(original_text)
+
+        await query.message.reply_text(
+            "🌐 Translation:\n\n" + result
+        )
 
 
 # =========================================================
@@ -295,22 +415,51 @@ async def handle_message(
 
     answer = await ai_reply(text)
 
-    # Translate button
+    # Telegram callback_data has a small size limit.
+    # Therefore use a short token stored in user context.
+    context.user_data["last_ai_reply"] = answer
+
     keyboard = [
         [
             InlineKeyboardButton(
                 "🌐 Translate",
-                callback_data="translate"
+                callback_data="translate_last"
             )
         ]
     ]
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
     await update.message.reply_text(
         answer,
-        reply_markup=reply_markup,
+        reply_markup=InlineKeyboardMarkup(keyboard),
         disable_web_page_preview=True,
+    )
+
+
+# =========================================================
+# LAST REPLY TRANSLATION
+# =========================================================
+
+async def translate_last(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    query = update.callback_query
+
+    await query.answer()
+
+    text = context.user_data.get("last_ai_reply")
+
+    if not text:
+        await query.message.reply_text(
+            "❌ আগের reply পাওয়া যাচ্ছে না।"
+        )
+        return
+
+    result = await translate_text(text)
+
+    await query.message.reply_text(
+        "🌐 Translation:\n\n" + result
     )
 
 
@@ -351,14 +500,25 @@ def main():
     )
 
     application.add_handler(
+        CommandHandler("about", about_command)
+    )
+
+    application.add_handler(
         CommandHandler("translate", translate_command)
     )
 
-    # Translate button
+    # Buttons
     application.add_handler(
         CallbackQueryHandler(
-            translate_button,
-            pattern="^translate$"
+            translate_last,
+            pattern="^translate_last$"
+        )
+    )
+
+    application.add_handler(
+        CallbackQueryHandler(
+            button_handler,
+            pattern="^(about|translate_help|translate_reply:)"
         )
     )
 
@@ -374,12 +534,16 @@ def main():
     application.add_error_handler(error_handler)
 
     # =====================================================
-    # RENDER
+    # RENDER WEBHOOK
     # =====================================================
 
-    port = int(os.getenv("PORT", "10000"))
+    port = int(
+        os.getenv("PORT", "10000")
+    )
 
-    render_url = os.getenv("RENDER_EXTERNAL_URL")
+    render_url = os.getenv(
+        "RENDER_EXTERNAL_URL"
+    )
 
     if render_url:
 
@@ -389,7 +553,9 @@ def main():
             + BOT_TOKEN
         )
 
-        logger.info("Starting Render webhook...")
+        logger.info(
+            "Starting Render webhook..."
+        )
 
         application.run_webhook(
             listen="0.0.0.0",
@@ -402,7 +568,9 @@ def main():
 
     else:
 
-        logger.info("Starting polling...")
+        logger.info(
+            "Starting polling..."
+        )
 
         application.run_polling(
             drop_pending_updates=True,
@@ -411,7 +579,7 @@ def main():
 
 
 # =========================================================
-# START BOT
+# RUN
 # =========================================================
 
 if __name__ == "__main__":
