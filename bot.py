@@ -34,10 +34,16 @@ if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY is missing")
 
 
-# Gemini client
-client = genai.Client(api_key=GEMINI_API_KEY)
+# =========================================================
+# GEMINI
+# =========================================================
 
-MODEL = "gemini-2.5-flash"
+client = genai.Client(
+    api_key=GEMINI_API_KEY
+)
+
+# Current Gemini model
+MODEL = "gemini-3.6-flash"
 
 
 # =========================================================
@@ -81,7 +87,7 @@ ABOUT_TEXT = """
 # =========================================================
 
 SYSTEM_PROMPT = """
-তুমি একটি বন্ধুসুলভ Telegram AI assistant।
+তুমি একটি বন্ধুসুলভ Telegram AI Assistant।
 
 তুমি RJ Team Bangladesh Hacker Community-এর পক্ষ থেকে
 ব্যবহারকারীর সাথে বন্ধুর মতো কথা বলবে।
@@ -110,10 +116,12 @@ RULES:
 8. প্রশ্ন করলে প্রশ্নের উত্তর সরাসরি দাও।
 অযথা emotional কথা যোগ করবে না।
 
-9. ব্যবহারকারী যে ভাষায় লিখেছে, সম্ভব হলে সেই ভাষাতেই উত্তর দাও।
+9. ব্যবহারকারী যে ভাষায় লিখেছে,
+সম্ভব হলে সেই ভাষাতেই উত্তর দাও।
 
-10. বাংলা হলে বাংলা, English হলে English।
-Banglish হলে প্রয়োজন অনুযায়ী Banglish/বাংলায় উত্তর দিতে পারো।
+10. বাংলা হলে বাংলা।
+English হলে English।
+Banglish হলে প্রয়োজন অনুযায়ী Banglish বা বাংলা ব্যবহার করো।
 
 11. উত্তর natural এবং মানুষের মতো হবে।
 
@@ -136,14 +144,16 @@ Banglish হলে প্রয়োজন অনুযায়ী Banglish/বা�
 # GEMINI GENERATE
 # =========================================================
 
-async def generate_gemini(prompt, system_instruction=None):
+async def generate_gemini(
+    prompt,
+    system_instruction=None
+):
 
     try:
 
         config = types.GenerateContentConfig(
             system_instruction=system_instruction,
             max_output_tokens=500,
-            temperature=0.9,
         )
 
         response = await client.aio.models.generate_content(
@@ -228,15 +238,16 @@ async def help_command(
         "💬 যেকোনো SMS পাঠাও।\n"
         "😂 মজার হলে মজার reply\n"
         "❤️ Emotional হলে emotional reply\n"
-        "🤔 প্রশ্ন হলে উত্তর\n"
-        "🌐 Translate করতে:\n\n"
+        "🤔 প্রশ্ন হলে উত্তর\n\n"
+        "🌐 Translate:\n"
         "/translate Hello, how are you?\n\n"
-        "ℹ️ About দেখতে /about ব্যবহার করো।"
+        "ℹ️ About:\n"
+        "/about"
     )
 
 
 # =========================================================
-# ABOUT COMMAND
+# ABOUT
 # =========================================================
 
 async def about_command(
@@ -339,7 +350,7 @@ async def translate_command(
         await update.message.reply_text(
             "🌐 Translate ব্যবহার করার নিয়ম:\n\n"
             "/translate Hello, how are you?\n\n"
-            "উত্তর বাংলায় পাওয়া যাবে। ❤️"
+            "ডিফল্টভাবে বাংলা translation দেওয়া হবে। ❤️"
         )
 
         return
@@ -371,10 +382,7 @@ async def button_handler(
 
     await query.answer()
 
-    # -----------------------------------------------------
     # ABOUT
-    # -----------------------------------------------------
-
     if query.data == "about":
 
         keyboard = [
@@ -398,11 +406,7 @@ async def button_handler(
 
         return
 
-
-    # -----------------------------------------------------
     # TRANSLATE HELP
-    # -----------------------------------------------------
-
     if query.data == "translate_help":
 
         await query.message.reply_text(
@@ -487,6 +491,11 @@ async def translate_last(
 
         return
 
+    try:
+        await query.message.chat.send_action("typing")
+    except Exception:
+        pass
+
     result = await translate_text(text)
 
     await query.message.reply_text(
@@ -521,39 +530,25 @@ def main():
         .build()
     )
 
-
     # -----------------------------------------------------
     # COMMANDS
     # -----------------------------------------------------
 
     application.add_handler(
-        CommandHandler(
-            "start",
-            start
-        )
+        CommandHandler("start", start)
     )
 
     application.add_handler(
-        CommandHandler(
-            "help",
-            help_command
-        )
+        CommandHandler("help", help_command)
     )
 
     application.add_handler(
-        CommandHandler(
-            "about",
-            about_command
-        )
+        CommandHandler("about", about_command)
     )
 
     application.add_handler(
-        CommandHandler(
-            "translate",
-            translate_command
-        )
+        CommandHandler("translate", translate_command)
     )
-
 
     # -----------------------------------------------------
     # BUTTONS
@@ -562,17 +557,16 @@ def main():
     application.add_handler(
         CallbackQueryHandler(
             translate_last,
-            pattern="^translate_last$"
+            pattern=r"^translate_last$"
         )
     )
 
     application.add_handler(
         CallbackQueryHandler(
             button_handler,
-            pattern="^(about|translate_help)$"
+            pattern=r"^(about|translate_help)$"
         )
     )
-
 
     # -----------------------------------------------------
     # MESSAGES
@@ -585,7 +579,6 @@ def main():
         )
     )
 
-
     # -----------------------------------------------------
     # ERROR
     # -----------------------------------------------------
@@ -594,22 +587,17 @@ def main():
         error_handler
     )
 
-
     # =====================================================
     # RENDER WEBHOOK
     # =====================================================
 
     port = int(
-        os.getenv(
-            "PORT",
-            "10000"
-        )
+        os.getenv("PORT", "10000")
     )
 
     render_url = os.getenv(
         "RENDER_EXTERNAL_URL"
     )
-
 
     if render_url:
 
@@ -631,7 +619,6 @@ def main():
             drop_pending_updates=True,
             allowed_updates=Update.ALL_TYPES,
         )
-
 
     else:
 
