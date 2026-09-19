@@ -35,14 +35,14 @@ if not GEMINI_API_KEY:
 
 
 # =========================================================
-# GEMINI
+# GEMINI CONFIG
 # =========================================================
 
 client = genai.Client(
     api_key=GEMINI_API_KEY
 )
 
-# Current Gemini model
+# IMPORTANT: Do not change this to gemini-2.5-flash
 MODEL = "gemini-3.6-flash"
 
 
@@ -92,36 +92,40 @@ SYSTEM_PROMPT = """
 তুমি RJ Team Bangladesh Hacker Community-এর পক্ষ থেকে
 ব্যবহারকারীর সাথে বন্ধুর মতো কথা বলবে।
 
-ব্যবহারকারীর SMS-এর ধরন বুঝে উত্তর দেবে।
+সবচেয়ে গুরুত্বপূর্ণ নিয়ম:
+
+ব্যবহারকারী যে ভাষাতেই SMS পাঠাক না কেন,
+সাধারণ AI reply অবশ্যই বাংলায় দিতে হবে।
+
+English SMS → বাংলায় উত্তর
+Banglish SMS → বাংলায় উত্তর
+বাংলা SMS → বাংলায় উত্তর
+অন্য ভাষার SMS → বাংলায় উত্তর
 
 RULES:
 
-1. সাধারণ প্রশ্ন হলে সরাসরি, পরিষ্কার ও বন্ধুসুলভ উত্তর দাও।
+1. সাধারণ প্রশ্ন হলে সরাসরি, পরিষ্কার ও সুন্দর বাংলায় উত্তর দাও।
 
-2. মজার SMS হলে মজার, playful এবং হাস্যকর ভঙ্গিতে উত্তর দাও।
+2. মজার SMS হলে বাংলায় মজার, playful এবং হাস্যকর reply দাও।
 প্রয়োজনে 😂 😄 🤣 😆 ব্যবহার করতে পারো।
 
-3. Emotional SMS হলে আন্তরিক, সুন্দর ও emotional ভঙ্গিতে উত্তর দাও।
+3. Emotional SMS হলে বাংলায় আন্তরিক, সুন্দর ও emotional reply দাও।
 প্রয়োজনে ❤️ 🥺 😔 💔 ব্যবহার করতে পারো।
 
-4. দুঃখের SMS হলে সহানুভূতিশীল হও।
+4. দুঃখের SMS হলে সহানুভূতিশীল বাংলায় উত্তর দাও।
 
-5. ভালোবাসা বা romantic SMS হলে কোমল ও সুন্দরভাবে উত্তর দাও।
+5. ভালোবাসা বা romantic SMS হলে কোমল ও সুন্দর বাংলায় উত্তর দাও।
 
-6. রাগের SMS হলে শান্ত ও ভদ্রভাবে উত্তর দাও।
+6. রাগের SMS হলে শান্ত ও ভদ্র বাংলায় উত্তর দাও।
 
 7. সব SMS-কে emotional বানাবে না।
 শুধু সত্যিই emotional SMS হলে emotional tone ব্যবহার করবে।
 
-8. প্রশ্ন করলে প্রশ্নের উত্তর সরাসরি দাও।
-অযথা emotional কথা যোগ করবে না।
+8. প্রশ্ন করলে প্রশ্নের উত্তর সরাসরি বাংলায় দাও।
 
-9. ব্যবহারকারী যে ভাষায় লিখেছে,
-সম্ভব হলে সেই ভাষাতেই উত্তর দাও।
+9. ব্যবহারকারী English-এ প্রশ্ন করলেও উত্তর বাংলায় দাও।
 
-10. বাংলা হলে বাংলা।
-English হলে English।
-Banglish হলে প্রয়োজন অনুযায়ী Banglish বা বাংলা ব্যবহার করো।
+10. ব্যবহারকারী Banglish-এ লিখলেও উত্তর বাংলা অক্ষরে দেওয়ার চেষ্টা করো।
 
 11. উত্তর natural এবং মানুষের মতো হবে।
 
@@ -135,8 +139,9 @@ Banglish হলে প্রয়োজন অনুযায়ী Banglish বা �
 
 16. ব্যবহারকারীর মূল বক্তব্য বুঝে reply করবে।
 
-17. Translation চাইলে শুধু translation করবে।
-অপ্রয়োজনীয় explanation দেবে না।
+17. সাধারণ AI reply-এর মধ্যে অপ্রয়োজনীয় English ব্যবহার করবে না।
+
+18. Translation command ব্যবহার করলে Translation-এর নির্দেশনা অনুসরণ করবে।
 """
 
 
@@ -236,9 +241,10 @@ async def help_command(
     await update.message.reply_text(
         "🤖 Bot Help\n\n"
         "💬 যেকোনো SMS পাঠাও।\n"
+        "🇧🇩 AI reply সবসময় বাংলায় হবে।\n"
         "😂 মজার হলে মজার reply\n"
         "❤️ Emotional হলে emotional reply\n"
-        "🤔 প্রশ্ন হলে উত্তর\n\n"
+        "🤔 প্রশ্ন হলে বাংলায় উত্তর\n\n"
         "🌐 Translate:\n"
         "/translate Hello, how are you?\n\n"
         "ℹ️ About:\n"
@@ -247,7 +253,7 @@ async def help_command(
 
 
 # =========================================================
-# ABOUT
+# ABOUT COMMAND
 # =========================================================
 
 async def about_command(
@@ -307,11 +313,11 @@ Translate the following text naturally.
 
 Automatically detect the source language.
 
+If the user explicitly specifies a target language,
+translate into that target language.
+
 If no target language is specified,
 translate into Bangla.
-
-If a target language is explicitly mentioned,
-translate into that language.
 
 Return ONLY the translated text.
 
@@ -331,6 +337,7 @@ Text:
     )
 
     if not result:
+
         return "❌ Translation করতে সমস্যা হয়েছে।"
 
     return result
@@ -382,7 +389,10 @@ async def button_handler(
 
     await query.answer()
 
+    # -----------------------------------------------------
     # ABOUT
+    # -----------------------------------------------------
+
     if query.data == "about":
 
         keyboard = [
@@ -406,7 +416,11 @@ async def button_handler(
 
         return
 
+
+    # -----------------------------------------------------
     # TRANSLATE HELP
+    # -----------------------------------------------------
+
     if query.data == "translate_help":
 
         await query.message.reply_text(
@@ -535,19 +549,31 @@ def main():
     # -----------------------------------------------------
 
     application.add_handler(
-        CommandHandler("start", start)
+        CommandHandler(
+            "start",
+            start
+        )
     )
 
     application.add_handler(
-        CommandHandler("help", help_command)
+        CommandHandler(
+            "help",
+            help_command
+        )
     )
 
     application.add_handler(
-        CommandHandler("about", about_command)
+        CommandHandler(
+            "about",
+            about_command
+        )
     )
 
     application.add_handler(
-        CommandHandler("translate", translate_command)
+        CommandHandler(
+            "translate",
+            translate_command
+        )
     )
 
     # -----------------------------------------------------
@@ -592,7 +618,10 @@ def main():
     # =====================================================
 
     port = int(
-        os.getenv("PORT", "10000")
+        os.getenv(
+            "PORT",
+            "10000"
+        )
     )
 
     render_url = os.getenv(
