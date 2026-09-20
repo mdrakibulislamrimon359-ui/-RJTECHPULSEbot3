@@ -42,7 +42,7 @@ client = genai.Client(
     api_key=GEMINI_API_KEY
 )
 
-# IMPORTANT: Do not change this to gemini-2.5-flash
+# আপনার দেওয়া model অপরিবর্তিত রাখা হয়েছে
 MODEL = "gemini-3.6-flash"
 
 
@@ -159,6 +159,18 @@ async def generate_gemini(
         config = types.GenerateContentConfig(
             system_instruction=system_instruction,
             max_output_tokens=500,
+
+            # =================================================
+            # IMPORTANT:
+            # এই বটে কোনো Python function/tool ব্যবহার করা হয়নি।
+            # তাই Automatic Function Calling বন্ধ রাখা হয়েছে।
+            # এতে AFC warning আর আসবে না।
+            # =================================================
+            automatic_function_calling=(
+                types.AutomaticFunctionCallingConfig(
+                    disable=True
+                )
+            ),
         )
 
         response = await client.aio.models.generate_content(
@@ -337,7 +349,6 @@ Text:
     )
 
     if not result:
-
         return "❌ Translation করতে সমস্যা হয়েছে।"
 
     return result
@@ -415,7 +426,6 @@ async def button_handler(
         )
 
         return
-
 
     # -----------------------------------------------------
     # TRANSLATE HELP
