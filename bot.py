@@ -1,4 +1,5 @@
 import os
+import asyncio
 import logging
 
 from google import genai
@@ -42,8 +43,11 @@ client = genai.Client(
     api_key=GEMINI_API_KEY
 )
 
-# আপনার দেওয়া model অপরিবর্তিত রাখা হয়েছে
+# আপনার মূল model
 MODEL = "gemini-3.6-flash"
+
+# Fallback model
+FALLBACK_MODEL = "gemini-2.5-flash"
 
 
 # =========================================================
@@ -147,6 +151,7 @@ RULES:
 
 # =========================================================
 # GEMINI GENERATE
+# RETRY + FALLBACK + AFC DISABLED
 # =========================================================
 
 async def generate_gemini(
@@ -154,46 +159,132 @@ async def generate_gemini(
     system_instruction=None
 ):
 
-    try:
+    # প্রথমে মূল model,
+    # তারপর fallback model
+    models_to_try = [
+        MODEL,
+        FALLBACK_MODEL,
+    ]
 
-        config = types.GenerateContentConfig(
-            system_instruction=system_instruction,
-            max_output_tokens=500,
+    for model_name in models_to_try:
 
-            # =================================================
-            # IMPORTANT:
-            # এই বটে কোনো Python function/tool ব্যবহার করা হয়নি।
-            # তাই Automatic Function Calling বন্ধ রাখা হয়েছে।
-            # এতে AFC warning আর আসবে না।
-            # =================================================
-            automatic_function_calling=(
-                types.AutomaticFunctionCallingConfig(
-                    disable=True
+        # প্রতিটি model সর্বোচ্চ 3 বার চেষ্টা
+        for attempt in range(1, 4):
+
+            try:
+
+                logger.info(
+                    "Gemini request | model=%s | attempt=%s",
+                    model_name,
+                    attempt
                 )
-            ),
-        )
 
-        response = await client.aio.models.generate_content(
-            model=MODEL,
-            contents=prompt,
-            config=config,
-        )
+                config = types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    max_output_tokens=500,
 
-        answer = (response.text or "").strip()
+                    # -------------------------------------------------
+                    # AFC বন্ধ
+                    # এই বটে কোনো function/tool ব্যবহার করা হয়নি।
+                    # -------------------------------------------------
+                    automatic_function_calling=(
+                        types.AutomaticFunctionCallingConfig(
+                            disable=True
+                        )
+                    ),
+                )
 
-        if not answer:
-            return None
+                response = await client.aio.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=config,
+                )
 
-        return answer
+                answer = (response.text or "").strip()
 
-    except Exception as e:
+                if answer:
 
-        logger.exception(
-            "Gemini API error: %s",
-            e
-        )
+                    logger.info(
+                        "Gemini response successful | model=%s",
+                        model_name
+                    )
 
-        return None
+                    return answer
+
+                logger.warning(
+                    "Gemini returned empty response | model=%s",
+                    model_name
+                )
+
+            except Exception as e:
+
+                error_text = str(e)
+
+                logger.error(
+                    "Gemini error | model=%s | attempt=%s | %s",
+                    model_name,
+                    attempt,
+                    error_text
+                )
+
+                # =====================================================
+                # 503 / UNAVAILABLE
+                # =====================================================
+
+                if (
+                    "503" in error_text
+                    or "UNAVAILABLE" in error_text
+                    or "high demand" in error_text.lower()
+                ):
+
+                    if attempt < 3:
+
+                        # 3 sec → 6 sec
+                        wait_time = 3 * (
+                            2 ** (attempt - 1)
+                        )
+
+                        logger.warning(
+                            "Gemini temporarily unavailable. "
+                            "Retrying in %s seconds...",
+                            wait_time
+                        )
+
+                        await asyncio.sleep(
+                            wait_time
+                        )
+
+                        continue
+
+                    logger.warning(
+                        "Model %s failed after 3 attempts. "
+                        "Trying next model...",
+                        model_name
+                    )
+
+                    break
+
+                # =====================================================
+                # অন্য error
+                # =====================================================
+
+                logger.warning(
+                    "Non-503 Gemini error. "
+                    "Trying next model if available."
+                )
+
+                break
+
+
+    # =========================================================
+    # সব model ব্যর্থ
+    # =========================================================
+
+    logger.error(
+        "All Gemini models failed."
+    )
+
+    return None
 
 
 # =========================================================
@@ -237,7 +328,9 @@ async def start(
         "🤔 প্রশ্ন হলে সুন্দর উত্তর\n"
         "🌐 Translation-ও করা যাবে।\n\n"
         "নিচের Button ব্যবহার করতে পারো 👇",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=InlineKeyboardMarkup(
+            keyboard
+        ),
     )
 
 
@@ -288,7 +381,9 @@ async def about_command(
 
     await update.message.reply_text(
         ABOUT_TEXT,
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=InlineKeyboardMarkup(
+            keyboard
+        ),
         disable_web_page_preview=True,
     )
 
@@ -307,8 +402,8 @@ async def ai_reply(text):
     if not answer:
 
         return (
-            "😅 এখন AI থেকে উত্তর পাওয়া যাচ্ছে না!\n"
-            "কিছুক্ষণ পরে আবার চেষ্টা করো ❤️"
+            "😅 এখন AI সার্ভার থেকে উত্তর পাওয়া যাচ্ছে না।\n\n"
+            "কিছুক্ষণ পরে আবার SMS পাঠাও। ❤️"
         )
 
     return answer
@@ -349,7 +444,11 @@ Text:
     )
 
     if not result:
-        return "❌ Translation করতে সমস্যা হয়েছে।"
+
+        return (
+            "❌ Translation করতে সমস্যা হয়েছে।\n"
+            "কিছুক্ষণ পরে আবার চেষ্টা করুন।"
+        )
 
     return result
 
@@ -373,14 +472,22 @@ async def translate_command(
 
         return
 
-    text = " ".join(context.args)
+    text = " ".join(
+        context.args
+    )
 
     try:
-        await update.message.chat.send_action("typing")
+
+        await update.message.chat.send_action(
+            "typing"
+        )
+
     except Exception:
         pass
 
-    result = await translate_text(text)
+    result = await translate_text(
+        text
+    )
 
     await update.message.reply_text(
         "🌐 Translation:\n\n" + result
@@ -400,9 +507,9 @@ async def button_handler(
 
     await query.answer()
 
-    # -----------------------------------------------------
+    # =====================================================
     # ABOUT
-    # -----------------------------------------------------
+    # =====================================================
 
     if query.data == "about":
 
@@ -421,15 +528,17 @@ async def button_handler(
 
         await query.message.reply_text(
             ABOUT_TEXT,
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=InlineKeyboardMarkup(
+                keyboard
+            ),
             disable_web_page_preview=True,
         )
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # TRANSLATE HELP
-    # -----------------------------------------------------
+    # =====================================================
 
     if query.data == "translate_help":
 
@@ -465,14 +574,25 @@ async def handle_message(
         return
 
     try:
-        await update.message.chat.send_action("typing")
+
+        await update.message.chat.send_action(
+            "typing"
+        )
+
     except Exception:
         pass
 
-    answer = await ai_reply(text)
+    answer = await ai_reply(
+        text
+    )
 
+    # =====================================================
     # Save last AI reply
-    context.user_data["last_ai_reply"] = answer
+    # =====================================================
+
+    context.user_data[
+        "last_ai_reply"
+    ] = answer
 
     keyboard = [
         [
@@ -485,7 +605,9 @@ async def handle_message(
 
     await update.message.reply_text(
         answer,
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=InlineKeyboardMarkup(
+            keyboard
+        ),
         disable_web_page_preview=True,
     )
 
@@ -516,11 +638,17 @@ async def translate_last(
         return
 
     try:
-        await query.message.chat.send_action("typing")
+
+        await query.message.chat.send_action(
+            "typing"
+        )
+
     except Exception:
         pass
 
-    result = await translate_text(text)
+    result = await translate_text(
+        text
+    )
 
     await query.message.reply_text(
         "🌐 Translation:\n\n" + result
@@ -554,9 +682,9 @@ def main():
         .build()
     )
 
-    # -----------------------------------------------------
+    # =====================================================
     # COMMANDS
-    # -----------------------------------------------------
+    # =====================================================
 
     application.add_handler(
         CommandHandler(
@@ -586,9 +714,9 @@ def main():
         )
     )
 
-    # -----------------------------------------------------
+    # =====================================================
     # BUTTONS
-    # -----------------------------------------------------
+    # =====================================================
 
     application.add_handler(
         CallbackQueryHandler(
@@ -604,9 +732,9 @@ def main():
         )
     )
 
-    # -----------------------------------------------------
+    # =====================================================
     # MESSAGES
-    # -----------------------------------------------------
+    # =====================================================
 
     application.add_handler(
         MessageHandler(
@@ -615,9 +743,9 @@ def main():
         )
     )
 
-    # -----------------------------------------------------
+    # =====================================================
     # ERROR
-    # -----------------------------------------------------
+    # =====================================================
 
     application.add_error_handler(
         error_handler
