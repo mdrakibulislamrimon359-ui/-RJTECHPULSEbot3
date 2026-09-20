@@ -1,5 +1,5 @@
 
-# RJ Team Bangladesh Bot
+#bot(3)
 Telegram AI bot built with Python, python-telegram-bot and OpenAI.
 
 ## Required environment variables
