@@ -1,6 +1,7 @@
 import os
 import asyncio
 import logging
+import random
 
 from google import genai
 from google.genai import types
@@ -48,6 +49,15 @@ MODEL = "gemini-3.6-flash"
 
 # Fallback model
 FALLBACK_MODEL = "gemini-2.5-flash"
+
+
+# =========================================================
+# REQUEST CONTROL
+# =========================================================
+
+# একই সময়ে অতিরিক্ত Gemini request আটকাবে।
+# এতে 429/503 হওয়ার চাপ কমে।
+GEMINI_SEMAPHORE = asyncio.Semaphore(3)
 
 
 # =========================================================
@@ -146,138 +156,205 @@ RULES:
 17. সাধারণ AI reply-এর মধ্যে অপ্রয়োজনীয় English ব্যবহার করবে না।
 
 18. Translation command ব্যবহার করলে Translation-এর নির্দেশনা অনুসরণ করবে।
+
+19. উত্তর সংক্ষিপ্ত, স্বাভাবিক এবং Telegram chat-এর উপযোগী রাখবে।
+
+20. অপ্রয়োজনীয় heading বা দীর্ঘ explanation দেবে না,
+যদি ব্যবহারকারী বিস্তারিত না চায়।
 """
 
 
 # =========================================================
+# CHECK TRANSIENT ERROR
+# =========================================================
+
+def is_transient_error(error_text: str) -> bool:
+
+    error_text = error_text.lower()
+
+    transient_patterns = [
+        "429",
+        "500",
+        "502",
+        "503",
+        "504",
+        "resource_exhausted",
+        "unavailable",
+        "service unavailable",
+        "internal server error",
+        "bad gateway",
+        "gateway timeout",
+        "high demand",
+        "temporarily unavailable",
+        "timeout",
+    ]
+
+    return any(
+        pattern in error_text
+        for pattern in transient_patterns
+    )
+
+
+# =========================================================
 # GEMINI GENERATE
-# RETRY + FALLBACK + AFC DISABLED
+# FAST FALLBACK + RETRY + AFC DISABLED
 # =========================================================
 
 async def generate_gemini(
     prompt,
-    system_instruction=None
+    system_instruction=None,
 ):
 
-    # প্রথমে মূল model,
-    # তারপর fallback model
     models_to_try = [
         MODEL,
         FALLBACK_MODEL,
     ]
 
-    for model_name in models_to_try:
+    async with GEMINI_SEMAPHORE:
 
-        # প্রতিটি model সর্বোচ্চ 3 বার চেষ্টা
-        for attempt in range(1, 4):
+        for model_index, model_name in enumerate(
+            models_to_try
+        ):
 
-            try:
+            # মূল model এবং fallback উভয়ের জন্য
+            # সর্বোচ্চ 2 attempts
+            max_attempts = 2
 
-                logger.info(
-                    "Gemini request | model=%s | attempt=%s",
-                    model_name,
-                    attempt
-                )
+            for attempt in range(
+                1,
+                max_attempts + 1
+            ):
 
-                config = types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    max_output_tokens=500,
-
-                    # -------------------------------------------------
-                    # AFC বন্ধ
-                    # এই বটে কোনো function/tool ব্যবহার করা হয়নি।
-                    # -------------------------------------------------
-                    automatic_function_calling=(
-                        types.AutomaticFunctionCallingConfig(
-                            disable=True
-                        )
-                    ),
-                )
-
-                response = await client.aio.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    config=config,
-                )
-
-                answer = (response.text or "").strip()
-
-                if answer:
+                try:
 
                     logger.info(
-                        "Gemini response successful | model=%s",
-                        model_name
+                        "Gemini request | model=%s | attempt=%s/%s",
+                        model_name,
+                        attempt,
+                        max_attempts,
                     )
 
-                    return answer
+                    config = types.GenerateContentConfig(
+                        system_instruction=system_instruction,
 
-                logger.warning(
-                    "Gemini returned empty response | model=%s",
-                    model_name
-                )
+                        max_output_tokens=500,
 
-            except Exception as e:
+                        # -------------------------------------------------
+                        # AFC বন্ধ
+                        # এই bot-এ কোনো Python function/tool নেই।
+                        # -------------------------------------------------
+                        automatic_function_calling=(
+                            types.AutomaticFunctionCallingConfig(
+                                disable=True
+                            )
+                        ),
+                    )
 
-                error_text = str(e)
+                    response = await client.aio.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                        config=config,
+                    )
 
-                logger.error(
-                    "Gemini error | model=%s | attempt=%s | %s",
-                    model_name,
-                    attempt,
-                    error_text
-                )
+                    answer = (
+                        response.text or ""
+                    ).strip()
 
-                # =====================================================
-                # 503 / UNAVAILABLE
-                # =====================================================
+                    if answer:
 
-                if (
-                    "503" in error_text
-                    or "UNAVAILABLE" in error_text
-                    or "high demand" in error_text.lower()
-                ):
-
-                    if attempt < 3:
-
-                        # 3 sec → 6 sec
-                        wait_time = 3 * (
-                            2 ** (attempt - 1)
+                        logger.info(
+                            "Gemini success | model=%s",
+                            model_name,
                         )
 
-                        logger.warning(
-                            "Gemini temporarily unavailable. "
-                            "Retrying in %s seconds...",
-                            wait_time
-                        )
-
-                        await asyncio.sleep(
-                            wait_time
-                        )
-
-                        continue
+                        return answer
 
                     logger.warning(
-                        "Model %s failed after 3 attempts. "
-                        "Trying next model...",
-                        model_name
+                        "Gemini returned empty response | model=%s",
+                        model_name,
+                    )
+
+                except Exception as e:
+
+                    error_text = str(e)
+
+                    logger.error(
+                        "Gemini error | model=%s | "
+                        "attempt=%s/%s | %s",
+                        model_name,
+                        attempt,
+                        max_attempts,
+                        error_text,
+                    )
+
+                    # =====================================================
+                    # TRANSIENT ERROR
+                    # =====================================================
+
+                    if is_transient_error(
+                        error_text
+                    ):
+
+                        # -------------------------------------------------
+                        # Primary model:
+                        # প্রথম transient error-এই fallback-এ যাবে।
+                        # এতে user বেশি সময় অপেক্ষা করবে না।
+                        # -------------------------------------------------
+
+                        if model_index == 0:
+
+                            logger.warning(
+                                "Primary model temporarily unavailable. "
+                                "Switching to fallback model..."
+                            )
+
+                            break
+
+                        # -------------------------------------------------
+                        # Fallback model:
+                        # দ্বিতীয়বার চেষ্টা করার আগে backoff।
+                        # -------------------------------------------------
+
+                        if attempt < max_attempts:
+
+                            # 2s → 4s
+                            base_wait = 2 * attempt
+
+                            # ছোট random jitter
+                            jitter = random.uniform(
+                                0.2,
+                                0.8,
+                            )
+
+                            wait_time = (
+                                base_wait + jitter
+                            )
+
+                            logger.warning(
+                                "Fallback model temporarily "
+                                "unavailable. Retrying in %.1f seconds...",
+                                wait_time,
+                            )
+
+                            await asyncio.sleep(
+                                wait_time
+                            )
+
+                            continue
+
+                    # -------------------------------------------------
+                    # অন্য error হলে এই model-এর retry না করে
+                    # পরের model-এ যাবে।
+                    # -------------------------------------------------
+
+                    logger.warning(
+                        "Trying next Gemini model if available..."
                     )
 
                     break
 
-                # =====================================================
-                # অন্য error
-                # =====================================================
-
-                logger.warning(
-                    "Non-503 Gemini error. "
-                    "Trying next model if available."
-                )
-
-                break
-
-
     # =========================================================
-    # সব model ব্যর্থ
+    # ALL MODELS FAILED
     # =========================================================
 
     logger.error(
@@ -293,28 +370,31 @@ async def generate_gemini(
 
 async def start(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ):
+
+    if not update.message:
+        return
 
     keyboard = [
         [
             InlineKeyboardButton(
                 "ℹ️ About",
-                callback_data="about"
+                callback_data="about",
             ),
             InlineKeyboardButton(
                 "🌐 Translate",
-                callback_data="translate_help"
+                callback_data="translate_help",
             ),
         ],
         [
             InlineKeyboardButton(
                 "📢 Channel",
-                url="https://t.me/RJteam123890"
+                url="https://t.me/RJteam123890",
             ),
             InlineKeyboardButton(
                 "👑 Owner",
-                url="https://t.me/RJteam1"
+                url="https://t.me/RJteam1",
             ),
         ],
     ]
@@ -340,8 +420,11 @@ async def start(
 
 async def help_command(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ):
+
+    if not update.message:
+        return
 
     await update.message.reply_text(
         "🤖 Bot Help\n\n"
@@ -363,18 +446,21 @@ async def help_command(
 
 async def about_command(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ):
+
+    if not update.message:
+        return
 
     keyboard = [
         [
             InlineKeyboardButton(
                 "👑 Owner",
-                url="https://t.me/RJteam1"
+                url="https://t.me/RJteam1",
             ),
             InlineKeyboardButton(
                 "📢 Channel",
-                url="https://t.me/RJteam123890"
+                url="https://t.me/RJteam123890",
             ),
         ]
     ]
@@ -392,7 +478,9 @@ async def about_command(
 # AI REPLY
 # =========================================================
 
-async def ai_reply(text):
+async def ai_reply(
+    text,
+):
 
     answer = await generate_gemini(
         prompt=text,
@@ -403,7 +491,7 @@ async def ai_reply(text):
 
         return (
             "😅 এখন AI সার্ভার থেকে উত্তর পাওয়া যাচ্ছে না।\n\n"
-            "কিছুক্ষণ পরে আবার SMS পাঠাও। ❤️"
+            "কিছুক্ষণ পরে আবার চেষ্টা করো। ❤️"
         )
 
     return answer
@@ -413,7 +501,9 @@ async def ai_reply(text):
 # TRANSLATE
 # =========================================================
 
-async def translate_text(text):
+async def translate_text(
+    text,
+):
 
     prompt = f"""
 Translate the following text naturally.
@@ -459,8 +549,11 @@ Text:
 
 async def translate_command(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ):
+
+    if not update.message:
+        return
 
     if not context.args:
 
@@ -490,7 +583,8 @@ async def translate_command(
     )
 
     await update.message.reply_text(
-        "🌐 Translation:\n\n" + result
+        "🌐 Translation:\n\n" + result,
+        disable_web_page_preview=True,
     )
 
 
@@ -500,10 +594,13 @@ async def translate_command(
 
 async def button_handler(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ):
 
     query = update.callback_query
+
+    if not query:
+        return
 
     await query.answer()
 
@@ -517,11 +614,11 @@ async def button_handler(
             [
                 InlineKeyboardButton(
                     "👑 Owner",
-                    url="https://t.me/RJteam1"
+                    url="https://t.me/RJteam1",
                 ),
                 InlineKeyboardButton(
                     "📢 Channel",
-                    url="https://t.me/RJteam123890"
+                    url="https://t.me/RJteam123890",
                 ),
             ]
         ]
@@ -559,7 +656,7 @@ async def button_handler(
 
 async def handle_message(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ):
 
     if not update.message:
@@ -598,7 +695,7 @@ async def handle_message(
         [
             InlineKeyboardButton(
                 "🌐 Translate",
-                callback_data="translate_last"
+                callback_data="translate_last",
             )
         ]
     ]
@@ -618,10 +715,13 @@ async def handle_message(
 
 async def translate_last(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ):
 
     query = update.callback_query
+
+    if not query:
+        return
 
     await query.answer()
 
@@ -651,7 +751,8 @@ async def translate_last(
     )
 
     await query.message.reply_text(
-        "🌐 Translation:\n\n" + result
+        "🌐 Translation:\n\n" + result,
+        disable_web_page_preview=True,
     )
 
 
@@ -661,12 +762,12 @@ async def translate_last(
 
 async def error_handler(
     update: object,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ):
 
     logger.exception(
         "Telegram error: %s",
-        context.error
+        context.error,
     )
 
 
@@ -689,28 +790,28 @@ def main():
     application.add_handler(
         CommandHandler(
             "start",
-            start
+            start,
         )
     )
 
     application.add_handler(
         CommandHandler(
             "help",
-            help_command
+            help_command,
         )
     )
 
     application.add_handler(
         CommandHandler(
             "about",
-            about_command
+            about_command,
         )
     )
 
     application.add_handler(
         CommandHandler(
             "translate",
-            translate_command
+            translate_command,
         )
     )
 
@@ -721,14 +822,14 @@ def main():
     application.add_handler(
         CallbackQueryHandler(
             translate_last,
-            pattern=r"^translate_last$"
+            pattern=r"^translate_last$",
         )
     )
 
     application.add_handler(
         CallbackQueryHandler(
             button_handler,
-            pattern=r"^(about|translate_help)$"
+            pattern=r"^(about|translate_help)$",
         )
     )
 
@@ -739,7 +840,7 @@ def main():
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
-            handle_message
+            handle_message,
         )
     )
 
@@ -758,7 +859,7 @@ def main():
     port = int(
         os.getenv(
             "PORT",
-            "10000"
+            "10000",
         )
     )
 
