@@ -37,26 +37,50 @@ if not GEMINI_API_KEY:
 
 
 # =========================================================
-# GEMINI CONFIG
+# GEMINI CLIENT
 # =========================================================
 
 client = genai.Client(
     api_key=GEMINI_API_KEY
 )
 
-# আপনার মূল model
-MODEL = "gemini-3.6-flash"
 
-# Fallback model
-FALLBACK_MODEL = "gemini-2.5-flash"
+# =========================================================
+# GEMINI MODELS
+# =========================================================
+#
+# একটার সমস্যা হলে পরেরটায় যাবে।
+#
+# Primary:
+# 3.8 Flash
+#
+# Fallback:
+# 3.7 Flash
+# 3.6 Flash
+# 2.5 Flash
+# 3.5 Flash-Lite
+#
+# =========================================================
+
+GEMINI_MODELS = [
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-2.5-flash",
+    "gemini-3.5-flash-lite",
+]
 
 
 # =========================================================
 # REQUEST CONTROL
 # =========================================================
+#
+# একই সময়ে সর্বোচ্চ 3টি Gemini request।
+#
+# এতে অনেক user একসাথে SMS পাঠালে চাপ কমে।
+#
+# =========================================================
 
-# একই সময়ে অতিরিক্ত Gemini request আটকাবে।
-# এতে 429/503 হওয়ার চাপ কমে।
 GEMINI_SEMAPHORE = asyncio.Semaphore(3)
 
 
@@ -65,7 +89,10 @@ GEMINI_SEMAPHORE = asyncio.Semaphore(3)
 # =========================================================
 
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format=(
+        "%(asctime)s - %(name)s - "
+        "%(levelname)s - %(message)s"
+    ),
     level=logging.INFO,
 )
 
@@ -82,7 +109,8 @@ ABOUT_TEXT = """
 আমি তোমার AI Assistant। ❤️
 
 আমি RJ Team Bangladesh Hacker Community-এর পক্ষ থেকে
-তোমার বন্ধু হিসেবে তোমার বিভিন্ন প্রশ্নের উত্তর দেওয়ার চেষ্টা করি। 😊
+তোমার বন্ধু হিসেবে তোমার বিভিন্ন প্রশ্নের উত্তর দেওয়ার
+চেষ্টা করি। 😊
 
 💬 সাধারণ প্রশ্ন → সুন্দর উত্তর
 😂 মজার SMS → মজার reply
@@ -165,14 +193,14 @@ RULES:
 
 
 # =========================================================
-# CHECK TRANSIENT ERROR
+# TRANSIENT ERROR CHECK
 # =========================================================
 
 def is_transient_error(error_text: str) -> bool:
 
-    error_text = error_text.lower()
+    text = error_text.lower()
 
-    transient_patterns = [
+    patterns = [
         "429",
         "500",
         "502",
@@ -187,17 +215,18 @@ def is_transient_error(error_text: str) -> bool:
         "high demand",
         "temporarily unavailable",
         "timeout",
+        "rate limit",
+        "too many requests",
     ]
 
     return any(
-        pattern in error_text
-        for pattern in transient_patterns
+        pattern in text
+        for pattern in patterns
     )
 
 
 # =========================================================
-# GEMINI GENERATE
-# FAST FALLBACK + RETRY + AFC DISABLED
+# GEMINI GENERATOR
 # =========================================================
 
 async def generate_gemini(
@@ -205,20 +234,26 @@ async def generate_gemini(
     system_instruction=None,
 ):
 
-    models_to_try = [
-        MODEL,
-        FALLBACK_MODEL,
-    ]
-
     async with GEMINI_SEMAPHORE:
 
+        # -------------------------------------------------
+        # প্রতিটি model একবার করে চেষ্টা করবে।
+        # Transient error হলে প্রয়োজনে retry করবে।
+        # -------------------------------------------------
+
         for model_index, model_name in enumerate(
-            models_to_try
+            GEMINI_MODELS
         ):
 
-            # মূল model এবং fallback উভয়ের জন্য
-            # সর্বোচ্চ 2 attempts
-            max_attempts = 2
+            # Primary model:
+            # দ্রুত fallback করার জন্য 1 retry
+            #
+            # অন্য model:
+            # 2 attempt
+            #
+            max_attempts = (
+                1 if model_index == 0 else 2
+            )
 
             for attempt in range(
                 1,
@@ -228,21 +263,21 @@ async def generate_gemini(
                 try:
 
                     logger.info(
-                        "Gemini request | model=%s | attempt=%s/%s",
+                        "Gemini request | "
+                        "model=%s | attempt=%s/%s",
                         model_name,
                         attempt,
                         max_attempts,
                     )
 
+                    # -------------------------------------------------
+                    # AFC সম্পূর্ণ বন্ধ
+                    # এই bot-এ function/tool দরকার নেই।
+                    # -------------------------------------------------
+
                     config = types.GenerateContentConfig(
                         system_instruction=system_instruction,
-
                         max_output_tokens=500,
-
-                        # -------------------------------------------------
-                        # AFC বন্ধ
-                        # এই bot-এ কোনো Python function/tool নেই।
-                        # -------------------------------------------------
                         automatic_function_calling=(
                             types.AutomaticFunctionCallingConfig(
                                 disable=True
@@ -250,15 +285,21 @@ async def generate_gemini(
                         ),
                     )
 
-                    response = await client.aio.models.generate_content(
-                        model=model_name,
-                        contents=prompt,
-                        config=config,
+                    response = (
+                        await client.aio.models.generate_content(
+                            model=model_name,
+                            contents=prompt,
+                            config=config,
+                        )
                     )
 
                     answer = (
                         response.text or ""
                     ).strip()
+
+                    # -------------------------------------------------
+                    # Empty response
+                    # -------------------------------------------------
 
                     if answer:
 
@@ -270,16 +311,20 @@ async def generate_gemini(
                         return answer
 
                     logger.warning(
-                        "Gemini returned empty response | model=%s",
+                        "Gemini empty response | model=%s",
                         model_name,
                     )
+
+                    # Empty হলে পরের model
+                    break
 
                 except Exception as e:
 
                     error_text = str(e)
 
                     logger.error(
-                        "Gemini error | model=%s | "
+                        "Gemini error | "
+                        "model=%s | "
                         "attempt=%s/%s | %s",
                         model_name,
                         attempt,
@@ -287,40 +332,29 @@ async def generate_gemini(
                         error_text,
                     )
 
-                    # =====================================================
+                    # =================================================
                     # TRANSIENT ERROR
-                    # =====================================================
+                    # =================================================
 
                     if is_transient_error(
                         error_text
                     ):
 
                         # -------------------------------------------------
-                        # Primary model:
-                        # প্রথম transient error-এই fallback-এ যাবে।
-                        # এতে user বেশি সময় অপেক্ষা করবে না।
-                        # -------------------------------------------------
-
-                        if model_index == 0:
-
-                            logger.warning(
-                                "Primary model temporarily unavailable. "
-                                "Switching to fallback model..."
-                            )
-
-                            break
-
-                        # -------------------------------------------------
-                        # Fallback model:
-                        # দ্বিতীয়বার চেষ্টা করার আগে backoff।
+                        # শেষ attempt না হলে retry
                         # -------------------------------------------------
 
                         if attempt < max_attempts:
 
-                            # 2s → 4s
-                            base_wait = 2 * attempt
+                            # Exponential backoff:
+                            #
+                            # 1st retry ≈ 2 sec
+                            # 2nd retry ≈ 4 sec
+                            #
+                            base_wait = (
+                                2 ** attempt
+                            )
 
-                            # ছোট random jitter
                             jitter = random.uniform(
                                 0.2,
                                 0.8,
@@ -331,8 +365,9 @@ async def generate_gemini(
                             )
 
                             logger.warning(
-                                "Fallback model temporarily "
-                                "unavailable. Retrying in %.1f seconds...",
+                                "Transient Gemini error. "
+                                "Retrying model=%s in %.1f seconds...",
+                                model_name,
                                 wait_time,
                             )
 
@@ -342,13 +377,26 @@ async def generate_gemini(
 
                             continue
 
-                    # -------------------------------------------------
-                    # অন্য error হলে এই model-এর retry না করে
-                    # পরের model-এ যাবে।
-                    # -------------------------------------------------
+                        # -------------------------------------------------
+                        # এই model unavailable।
+                        # পরের model-এ যাবে।
+                        # -------------------------------------------------
+
+                        logger.warning(
+                            "Model %s unavailable. "
+                            "Trying next model...",
+                            model_name,
+                        )
+
+                        break
+
+                    # =================================================
+                    # NON-TRANSIENT ERROR
+                    # =================================================
 
                     logger.warning(
-                        "Trying next Gemini model if available..."
+                        "Non-transient Gemini error. "
+                        "Trying next model..."
                     )
 
                     break
@@ -358,7 +406,7 @@ async def generate_gemini(
     # =========================================================
 
     logger.error(
-        "All Gemini models failed."
+        "ALL GEMINI MODELS FAILED."
     )
 
     return None
@@ -441,7 +489,7 @@ async def help_command(
 
 
 # =========================================================
-# ABOUT COMMAND
+# ABOUT
 # =========================================================
 
 async def about_command(
@@ -490,8 +538,8 @@ async def ai_reply(
     if not answer:
 
         return (
-            "😅 এখন AI সার্ভার থেকে উত্তর পাওয়া যাচ্ছে না।\n\n"
-            "কিছুক্ষণ পরে আবার চেষ্টা করো। ❤️"
+            "😅 এই মুহূর্তে AI সার্ভারগুলো ব্যস্ত আছে।\n\n"
+            "একটু পরে আবার SMS পাঠাও। ❤️"
         )
 
     return answer
@@ -536,7 +584,7 @@ Text:
     if not result:
 
         return (
-            "❌ Translation করতে সমস্যা হয়েছে।\n"
+            "❌ Translation সার্ভার এই মুহূর্তে ব্যস্ত।\n"
             "কিছুক্ষণ পরে আবার চেষ্টা করুন।"
         )
 
@@ -679,17 +727,25 @@ async def handle_message(
     except Exception:
         pass
 
+    # -----------------------------------------------------
+    # AI
+    # -----------------------------------------------------
+
     answer = await ai_reply(
         text
     )
 
-    # =====================================================
-    # Save last AI reply
-    # =====================================================
+    # -----------------------------------------------------
+    # Save last reply
+    # -----------------------------------------------------
 
     context.user_data[
         "last_ai_reply"
     ] = answer
+
+    # -----------------------------------------------------
+    # Translate button
+    # -----------------------------------------------------
 
     keyboard = [
         [
@@ -710,7 +766,7 @@ async def handle_message(
 
 
 # =========================================================
-# LAST REPLY TRANSLATION
+# TRANSLATE LAST AI REPLY
 # =========================================================
 
 async def translate_last(
@@ -765,9 +821,10 @@ async def error_handler(
     context: ContextTypes.DEFAULT_TYPE,
 ):
 
-    logger.exception(
+    logger.error(
         "Telegram error: %s",
         context.error,
+        exc_info=True,
     )
 
 
@@ -834,7 +891,7 @@ def main():
     )
 
     # =====================================================
-    # MESSAGES
+    # TEXT MESSAGES
     # =====================================================
 
     application.add_handler(
@@ -853,7 +910,7 @@ def main():
     )
 
     # =====================================================
-    # RENDER WEBHOOK
+    # RENDER
     # =====================================================
 
     port = int(
@@ -866,6 +923,10 @@ def main():
     render_url = os.getenv(
         "RENDER_EXTERNAL_URL"
     )
+
+    # =====================================================
+    # WEBHOOK
+    # =====================================================
 
     if render_url:
 
@@ -888,10 +949,18 @@ def main():
             allowed_updates=Update.ALL_TYPES,
         )
 
+    # =====================================================
+    # POLLING
+    # =====================================================
+
     else:
 
         logger.info(
-            "Starting polling..."
+            "RENDER_EXTERNAL_URL not found."
+        )
+
+        logger.info(
+            "Starting Telegram polling..."
         )
 
         application.run_polling(
