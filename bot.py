@@ -1,17 +1,12 @@
 import os
 import asyncio
 import logging
-import random
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
 
-from google import genai
-from google.genai import types
-
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
-
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -20,958 +15,499 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+from faster_whisper import WhisperModel
+from deep_translator import GoogleTranslator
+import edge_tts
 
 
-# =========================================================
-# CONFIG
-# =========================================================
+# ==================== CONFIGURATION ====================
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is missing")
-
-if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY is missing")
-
-
-# =========================================================
-# GEMINI CLIENT
-# =========================================================
-
-client = genai.Client(
-    api_key=GEMINI_API_KEY
-)
-
-
-# =========================================================
-# GEMINI MODELS
-# =========================================================
-#
-# একটার সমস্যা হলে পরেরটায় যাবে।
-#
-# Primary:
-# 3.8 Flash
-#
-# Fallback:
-# 3.7 Flash
-# 3.6 Flash
-# 2.5 Flash
-# 3.5 Flash-Lite
-#
-# =========================================================
-
-GEMINI_MODELS = [
-    "gemini-3.8-flash",
-    "gemini-3.7-flash",
-    "gemini-3.6-flash",
-    "gemini-2.5-flash",
-    "gemini-3.5-flash-lite",
-]
-
-
-# =========================================================
-# REQUEST CONTROL
-# =========================================================
-#
-# একই সময়ে সর্বোচ্চ 3টি Gemini request।
-#
-# এতে অনেক user একসাথে SMS পাঠালে চাপ কমে।
-#
-# =========================================================
-
-GEMINI_SEMAPHORE = asyncio.Semaphore(3)
-
-
-# =========================================================
-# LOGGING
-# =========================================================
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+MAX_VIDEO_MB = int(os.getenv("MAX_VIDEO_MB", "20"))
+WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL", "base")
+MAX_TRANSCRIPT_CHARS = int(os.getenv("MAX_TRANSCRIPT_CHARS", "4500"))
 
 logging.basicConfig(
-    format=(
-        "%(asctime)s - %(name)s - "
-        "%(levelname)s - %(message)s"
-    ),
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     level=logging.INFO,
 )
-
-logger = logging.getLogger(__name__)
-
-
-# =========================================================
-# BOT INFORMATION
-# =========================================================
-
-ABOUT_TEXT = """
-🤖 About AI Assistant
-
-আমি তোমার AI Assistant। ❤️
-
-আমি RJ Team Bangladesh Hacker Community-এর পক্ষ থেকে
-তোমার বন্ধু হিসেবে তোমার বিভিন্ন প্রশ্নের উত্তর দেওয়ার
-চেষ্টা করি। 😊
-
-💬 সাধারণ প্রশ্ন → সুন্দর উত্তর
-😂 মজার SMS → মজার reply
-❤️ Emotional SMS → emotional reply
-🌐 Translation → যেকোনো ভাষার অনুবাদ
-
-👑 Owner: @RJteam1
-📢 Channel: @RJteam123890
-
-🤝 RJ Team Bangladesh Hacker Community
-"""
+log = logging.getLogger("video-translator")
 
 
-# =========================================================
-# AI PERSONALITY
-# =========================================================
+# Language name: (translation language code, TTS voice)
+LANGUAGES = {
+    "বাংলা": ("bn", "bn-BD-NabanitaNeural"),
+    "English": ("en", "en-US-AriaNeural"),
+    "हिन्दी": ("hi", "hi-IN-SwaraNeural"),
+    "العربية": ("ar", "ar-SA-ZariyahNeural"),
+    "Español": ("es", "es-ES-ElviraNeural"),
+    "Français": ("fr", "fr-FR-DeniseNeural"),
+    "日本語": ("ja", "ja-JP-NanamiNeural"),
+    "Português": ("pt", "pt-BR-FranciscaNeural"),
+    "Русский": ("ru", "ru-RU-SvetlanaNeural"),
+    "中文": ("zh-CN", "zh-CN-XiaoxiaoNeural"),
+}
 
-SYSTEM_PROMPT = """
-তুমি একটি বন্ধুসুলভ Telegram AI Assistant।
-
-তুমি RJ Team Bangladesh Hacker Community-এর পক্ষ থেকে
-ব্যবহারকারীর সাথে বন্ধুর মতো কথা বলবে।
-
-সবচেয়ে গুরুত্বপূর্ণ নিয়ম:
-
-ব্যবহারকারী যে ভাষাতেই SMS পাঠাক না কেন,
-সাধারণ AI reply অবশ্যই বাংলায় দিতে হবে।
-
-English SMS → বাংলায় উত্তর
-Banglish SMS → বাংলায় উত্তর
-বাংলা SMS → বাংলায় উত্তর
-অন্য ভাষার SMS → বাংলায় উত্তর
-
-RULES:
-
-1. সাধারণ প্রশ্ন হলে সরাসরি, পরিষ্কার ও সুন্দর বাংলায় উত্তর দাও।
-
-2. মজার SMS হলে বাংলায় মজার, playful এবং হাস্যকর reply দাও।
-প্রয়োজনে 😂 😄 🤣 😆 ব্যবহার করতে পারো।
-
-3. Emotional SMS হলে বাংলায় আন্তরিক, সুন্দর ও emotional reply দাও।
-প্রয়োজনে ❤️ 🥺 😔 💔 ব্যবহার করতে পারো।
-
-4. দুঃখের SMS হলে সহানুভূতিশীল বাংলায় উত্তর দাও।
-
-5. ভালোবাসা বা romantic SMS হলে কোমল ও সুন্দর বাংলায় উত্তর দাও।
-
-6. রাগের SMS হলে শান্ত ও ভদ্র বাংলায় উত্তর দাও।
-
-7. সব SMS-কে emotional বানাবে না।
-শুধু সত্যিই emotional SMS হলে emotional tone ব্যবহার করবে।
-
-8. প্রশ্ন করলে প্রশ্নের উত্তর সরাসরি বাংলায় দাও।
-
-9. ব্যবহারকারী English-এ প্রশ্ন করলেও উত্তর বাংলায় দাও।
-
-10. ব্যবহারকারী Banglish-এ লিখলেও উত্তর বাংলা অক্ষরে দেওয়ার চেষ্টা করো।
-
-11. উত্তর natural এবং মানুষের মতো হবে।
-
-12. সাধারণ SMS-এর উত্তর খুব বড় করবে না।
-
-13. প্রয়োজন অনুযায়ী 1-3টি emoji ব্যবহার করো।
-
-14. একই reply বারবার হুবহু ব্যবহার করবে না।
-
-15. গুরুতর বিষয়ে মজা করবে না।
-
-16. ব্যবহারকারীর মূল বক্তব্য বুঝে reply করবে।
-
-17. সাধারণ AI reply-এর মধ্যে অপ্রয়োজনীয় English ব্যবহার করবে না।
-
-18. Translation command ব্যবহার করলে Translation-এর নির্দেশনা অনুসরণ করবে।
-
-19. উত্তর সংক্ষিপ্ত, স্বাভাবিক এবং Telegram chat-এর উপযোগী রাখবে।
-
-20. অপ্রয়োজনীয় heading বা দীর্ঘ explanation দেবে না,
-যদি ব্যবহারকারী বিস্তারিত না চায়।
-"""
+# Whisper model is loaded only when needed.
+whisper_model = None
 
 
-# =========================================================
-# TRANSIENT ERROR CHECK
-# =========================================================
+# ==================== HELPER FUNCTIONS ====================
 
-def is_transient_error(error_text: str) -> bool:
-
-    text = error_text.lower()
-
-    patterns = [
-        "429",
-        "500",
-        "502",
-        "503",
-        "504",
-        "resource_exhausted",
-        "unavailable",
-        "service unavailable",
-        "internal server error",
-        "bad gateway",
-        "gateway timeout",
-        "high demand",
-        "temporarily unavailable",
-        "timeout",
-        "rate limit",
-        "too many requests",
-    ]
-
-    return any(
-        pattern in text
-        for pattern in patterns
+def run_command(args):
+    """Run an external command and report errors."""
+    result = subprocess.run(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
 
+    if result.returncode != 0:
+        raise RuntimeError(
+            result.stderr[-1800:] or "External command failed."
+        )
 
-# =========================================================
-# GEMINI GENERATOR
-# =========================================================
+    return result.stdout
 
-async def generate_gemini(
-    prompt,
-    system_instruction=None,
+
+def ensure_ffmpeg():
+    """Check that FFmpeg is installed."""
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError(
+            "FFmpeg পাওয়া যায়নি। FFmpeg ইনস্টল করে PATH-এ যোগ করুন।"
+        )
+
+
+def get_whisper():
+    """Load the speech recognition model."""
+    global whisper_model
+
+    if whisper_model is None:
+        whisper_model = WhisperModel(
+            WHISPER_MODEL_SIZE,
+            device="cpu",
+            compute_type="int8",
+        )
+
+    return whisper_model
+
+
+def extract_audio(video_path: Path, wav_path: Path):
+    """Extract audio from the uploaded video."""
+    run_command([
+        "ffmpeg",
+        "-y",
+        "-i", str(video_path),
+        "-vn",
+        "-ac", "1",
+        "-ar", "16000",
+        str(wav_path),
+    ])
+
+
+def transcribe_audio(wav_path: Path) -> str:
+    """Convert spoken audio into text."""
+    model = get_whisper()
+
+    segments, _info = model.transcribe(
+        str(wav_path),
+        vad_filter=True,
+        beam_size=1,
+    )
+
+    transcript = " ".join(
+        segment.text.strip() for segment in segments
+    ).strip()
+
+    if not transcript:
+        raise RuntimeError(
+            "ভিডিওতে পরিষ্কার কথা শনাক্ত করা যায়নি।"
+        )
+
+    return transcript
+
+
+def translate_text(text: str, target_lang: str) -> str:
+    """Translate text into the selected language."""
+    chunks = []
+    remaining = text.strip()
+
+    while remaining:
+        if len(remaining) <= 3500:
+            chunks.append(remaining)
+            break
+
+        split_at = remaining.rfind(" ", 0, 3500)
+
+        if split_at < 1000:
+            split_at = 3500
+
+        chunks.append(remaining[:split_at].strip())
+        remaining = remaining[split_at:].strip()
+
+    translated_chunks = []
+
+    for chunk in chunks:
+        if chunk:
+            translated = GoogleTranslator(
+                source="auto",
+                target=target_lang,
+            ).translate(chunk)
+
+            if translated:
+                translated_chunks.append(translated)
+
+    result = " ".join(translated_chunks).strip()
+
+    if not result:
+        raise RuntimeError("অনুবাদ তৈরি করা যায়নি।")
+
+    return result
+
+
+async def synthesize_speech(
+    text: str,
+    voice: str,
+    output_path: Path,
 ):
+    """Generate translated speech using Edge TTS."""
+    if not text:
+        raise RuntimeError("অনুবাদ করা লেখা খালি।")
 
-    async with GEMINI_SEMAPHORE:
+    communicator = edge_tts.Communicate(text, voice)
+    await communicator.save(str(output_path))
 
-        # -------------------------------------------------
-        # প্রতিটি model একবার করে চেষ্টা করবে।
-        # Transient error হলে প্রয়োজনে retry করবে।
-        # -------------------------------------------------
 
-        for model_index, model_name in enumerate(
-            GEMINI_MODELS
-        ):
+def mux_video(
+    video_path: Path,
+    audio_path: Path,
+    output_path: Path,
+):
+    """Replace the video's original audio with translated speech."""
+    run_command([
+        "ffmpeg",
+        "-y",
+        "-i", str(video_path),
+        "-i", str(audio_path),
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "28",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-shortest",
+        "-movflags", "+faststart",
+        str(output_path),
+    ])
 
-            # Primary model:
-            # দ্রুত fallback করার জন্য 1 retry
-            #
-            # অন্য model:
-            # 2 attempt
-            #
-            max_attempts = (
-                1 if model_index == 0 else 2
-            )
 
-            for attempt in range(
-                1,
-                max_attempts + 1
-            ):
+async def process_video(
+    video_path: Path,
+    output_path: Path,
+    target_lang: str,
+    voice: str,
+):
+    """Extract, transcribe, translate, synthesize, and combine."""
+    ensure_ffmpeg()
 
-                try:
+    work_dir = video_path.parent
+    wav_path = work_dir / "source_audio.wav"
+    tts_path = work_dir / "translated_voice.mp3"
 
-                    logger.info(
-                        "Gemini request | "
-                        "model=%s | attempt=%s/%s",
-                        model_name,
-                        attempt,
-                        max_attempts,
-                    )
-
-                    # -------------------------------------------------
-                    # AFC সম্পূর্ণ বন্ধ
-                    # এই bot-এ function/tool দরকার নেই।
-                    # -------------------------------------------------
-
-                    config = types.GenerateContentConfig(
-                        system_instruction=system_instruction,
-                        max_output_tokens=500,
-                        automatic_function_calling=(
-                            types.AutomaticFunctionCallingConfig(
-                                disable=True
-                            )
-                        ),
-                    )
-
-                    response = (
-                        await client.aio.models.generate_content(
-                            model=model_name,
-                            contents=prompt,
-                            config=config,
-                        )
-                    )
-
-                    answer = (
-                        response.text or ""
-                    ).strip()
-
-                    # -------------------------------------------------
-                    # Empty response
-                    # -------------------------------------------------
-
-                    if answer:
-
-                        logger.info(
-                            "Gemini success | model=%s",
-                            model_name,
-                        )
-
-                        return answer
-
-                    logger.warning(
-                        "Gemini empty response | model=%s",
-                        model_name,
-                    )
-
-                    # Empty হলে পরের model
-                    break
-
-                except Exception as e:
-
-                    error_text = str(e)
-
-                    logger.error(
-                        "Gemini error | "
-                        "model=%s | "
-                        "attempt=%s/%s | %s",
-                        model_name,
-                        attempt,
-                        max_attempts,
-                        error_text,
-                    )
-
-                    # =================================================
-                    # TRANSIENT ERROR
-                    # =================================================
-
-                    if is_transient_error(
-                        error_text
-                    ):
-
-                        # -------------------------------------------------
-                        # শেষ attempt না হলে retry
-                        # -------------------------------------------------
-
-                        if attempt < max_attempts:
-
-                            # Exponential backoff:
-                            #
-                            # 1st retry ≈ 2 sec
-                            # 2nd retry ≈ 4 sec
-                            #
-                            base_wait = (
-                                2 ** attempt
-                            )
-
-                            jitter = random.uniform(
-                                0.2,
-                                0.8,
-                            )
-
-                            wait_time = (
-                                base_wait + jitter
-                            )
-
-                            logger.warning(
-                                "Transient Gemini error. "
-                                "Retrying model=%s in %.1f seconds...",
-                                model_name,
-                                wait_time,
-                            )
-
-                            await asyncio.sleep(
-                                wait_time
-                            )
-
-                            continue
-
-                        # -------------------------------------------------
-                        # এই model unavailable।
-                        # পরের model-এ যাবে।
-                        # -------------------------------------------------
-
-                        logger.warning(
-                            "Model %s unavailable. "
-                            "Trying next model...",
-                            model_name,
-                        )
-
-                        break
-
-                    # =================================================
-                    # NON-TRANSIENT ERROR
-                    # =================================================
-
-                    logger.warning(
-                        "Non-transient Gemini error. "
-                        "Trying next model..."
-                    )
-
-                    break
-
-    # =========================================================
-    # ALL MODELS FAILED
-    # =========================================================
-
-    logger.error(
-        "ALL GEMINI MODELS FAILED."
+    # Run CPU-heavy processing in worker threads.
+    await asyncio.to_thread(
+        extract_audio,
+        video_path,
+        wav_path,
     )
 
-    return None
+    original_text = await asyncio.to_thread(
+        transcribe_audio,
+        wav_path,
+    )
+
+    original_text = original_text[:MAX_TRANSCRIPT_CHARS]
+
+    translated_text = await asyncio.to_thread(
+        translate_text,
+        original_text,
+        target_lang,
+    )
+
+    await synthesize_speech(
+        translated_text,
+        voice,
+        tts_path,
+    )
+
+    await asyncio.to_thread(
+        mux_video,
+        video_path,
+        tts_path,
+        output_path,
+    )
+
+    return original_text, translated_text
 
 
-# =========================================================
-# START
-# =========================================================
+# ==================== TELEGRAM COMMANDS ====================
 
 async def start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
-    if not update.message:
-        return
-
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "ℹ️ About",
-                callback_data="about",
-            ),
-            InlineKeyboardButton(
-                "🌐 Translate",
-                callback_data="translate_help",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "📢 Channel",
-                url="https://t.me/RJteam123890",
-            ),
-            InlineKeyboardButton(
-                "👑 Owner",
-                url="https://t.me/RJteam1",
-            ),
-        ],
-    ]
-
-    await update.message.reply_text(
-        "👋 হ্যালো বন্ধু! ❤️\n\n"
-        "আমি তোমার AI Assistant। 🤖\n\n"
-        "💬 যেকোনো SMS পাঠাও।\n"
-        "😂 মজার হলে মজার reply\n"
-        "❤️ Emotional হলে emotional reply\n"
-        "🤔 প্রশ্ন হলে সুন্দর উত্তর\n"
-        "🌐 Translation-ও করা যাবে।\n\n"
-        "নিচের Button ব্যবহার করতে পারো 👇",
-        reply_markup=InlineKeyboardMarkup(
-            keyboard
-        ),
+    """Handle /start."""
+    await update.effective_message.reply_text(
+        "🎬 AI Video Voice Translator Bot-এ স্বাগতম!\n\n"
+        "কীভাবে ব্যবহার করবেন:\n"
+        "১. ২০ MB-এর কম একটি ভিডিও পাঠান।\n"
+        "২. পছন্দের অনুবাদের ভাষা বেছে নিন।\n"
+        "৩. প্রসেসিং শেষ হলে নতুন অডিওসহ ভিডিও পাবেন।\n\n"
+        "⚠️ এটি একটি প্রাথমিক সংস্করণ।\n"
+        "এটি সাধারণ AI voice ব্যবহার করে; মূল বক্তার কণ্ঠ "
+        "ক্লোন করে না। অনুবাদ করা অডিওর টাইমিং মূল ভিডিওর "
+        "সঙ্গে পুরোপুরি মিলবে না।"
     )
 
-
-# =========================================================
-# HELP
-# =========================================================
 
 async def help_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
-    if not update.message:
-        return
-
-    await update.message.reply_text(
-        "🤖 Bot Help\n\n"
-        "💬 যেকোনো SMS পাঠাও।\n"
-        "🇧🇩 AI reply সবসময় বাংলায় হবে।\n"
-        "😂 মজার হলে মজার reply\n"
-        "❤️ Emotional হলে emotional reply\n"
-        "🤔 প্রশ্ন হলে বাংলায় উত্তর\n\n"
-        "🌐 Translate:\n"
-        "/translate Hello, how are you?\n\n"
-        "ℹ️ About:\n"
-        "/about"
-    )
+    """Handle /help."""
+    await start(update, context)
 
 
-# =========================================================
-# ABOUT
-# =========================================================
+# ==================== VIDEO HANDLER ====================
 
-async def about_command(
+async def video_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
+    """Receive a video and ask the user to select a language."""
+    message = update.effective_message
 
-    if not update.message:
+    item = message.video
+
+    if (
+        item is None
+        and message.document
+        and (message.document.mime_type or "").startswith("video/")
+    ):
+        item = message.document
+
+    if item is None:
+        await message.reply_text(
+            "দয়া করে একটি ভিডিও ফাইল পাঠান।"
+        )
         return
+
+    size = item.file_size or 0
+
+    if size > MAX_VIDEO_MB * 1024 * 1024:
+        await message.reply_text(
+            f"ভিডিওটি {MAX_VIDEO_MB} MB-এর বেশি। "
+            "ছোট ভিডিও দিয়ে আবার চেষ্টা করুন।"
+        )
+        return
+
+    context.user_data["pending_video_file_id"] = item.file_id
 
     keyboard = [
         [
             InlineKeyboardButton(
-                "👑 Owner",
-                url="https://t.me/RJteam1",
-            ),
-            InlineKeyboardButton(
-                "📢 Channel",
-                url="https://t.me/RJteam123890",
-            ),
-        ]
-    ]
-
-    await update.message.reply_text(
-        ABOUT_TEXT,
-        reply_markup=InlineKeyboardMarkup(
-            keyboard
-        ),
-        disable_web_page_preview=True,
-    )
-
-
-# =========================================================
-# AI REPLY
-# =========================================================
-
-async def ai_reply(
-    text,
-):
-
-    answer = await generate_gemini(
-        prompt=text,
-        system_instruction=SYSTEM_PROMPT,
-    )
-
-    if not answer:
-
-        return (
-            "😅 এই মুহূর্তে AI সার্ভারগুলো ব্যস্ত আছে।\n\n"
-            "একটু পরে আবার SMS পাঠাও। ❤️"
-        )
-
-    return answer
-
-
-# =========================================================
-# TRANSLATE
-# =========================================================
-
-async def translate_text(
-    text,
-):
-
-    prompt = f"""
-Translate the following text naturally.
-
-Automatically detect the source language.
-
-If the user explicitly specifies a target language,
-translate into that target language.
-
-If no target language is specified,
-translate into Bangla.
-
-Return ONLY the translated text.
-
-Do not explain.
-Do not add quotation marks.
-
-Text:
-{text}
-"""
-
-    result = await generate_gemini(
-        prompt=prompt,
-        system_instruction=(
-            "You are a professional translation assistant. "
-            "Return only the requested translation."
-        ),
-    )
-
-    if not result:
-
-        return (
-            "❌ Translation সার্ভার এই মুহূর্তে ব্যস্ত।\n"
-            "কিছুক্ষণ পরে আবার চেষ্টা করুন।"
-        )
-
-    return result
-
-
-# =========================================================
-# TRANSLATE COMMAND
-# =========================================================
-
-async def translate_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-
-    if not update.message:
-        return
-
-    if not context.args:
-
-        await update.message.reply_text(
-            "🌐 Translate ব্যবহার করার নিয়ম:\n\n"
-            "/translate Hello, how are you?\n\n"
-            "ডিফল্টভাবে বাংলা translation দেওয়া হবে। ❤️"
-        )
-
-        return
-
-    text = " ".join(
-        context.args
-    )
-
-    try:
-
-        await update.message.chat.send_action(
-            "typing"
-        )
-
-    except Exception:
-        pass
-
-    result = await translate_text(
-        text
-    )
-
-    await update.message.reply_text(
-        "🌐 Translation:\n\n" + result,
-        disable_web_page_preview=True,
-    )
-
-
-# =========================================================
-# BUTTON HANDLER
-# =========================================================
-
-async def button_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-
-    query = update.callback_query
-
-    if not query:
-        return
-
-    await query.answer()
-
-    # =====================================================
-    # ABOUT
-    # =====================================================
-
-    if query.data == "about":
-
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "👑 Owner",
-                    url="https://t.me/RJteam1",
-                ),
-                InlineKeyboardButton(
-                    "📢 Channel",
-                    url="https://t.me/RJteam123890",
-                ),
-            ]
-        ]
-
-        await query.message.reply_text(
-            ABOUT_TEXT,
-            reply_markup=InlineKeyboardMarkup(
-                keyboard
-            ),
-            disable_web_page_preview=True,
-        )
-
-        return
-
-    # =====================================================
-    # TRANSLATE HELP
-    # =====================================================
-
-    if query.data == "translate_help":
-
-        await query.message.reply_text(
-            "🌐 Translate\n\n"
-            "যেকোনো ভাষার লেখা translate করতে পারো।\n\n"
-            "উদাহরণ:\n"
-            "/translate Hello, how are you?\n\n"
-            "ডিফল্টভাবে বাংলা translation দেওয়া হবে। ❤️"
-        )
-
-        return
-
-
-# =========================================================
-# MESSAGE HANDLER
-# =========================================================
-
-async def handle_message(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-
-    if not update.message:
-        return
-
-    if not update.message.text:
-        return
-
-    text = update.message.text.strip()
-
-    if not text:
-        return
-
-    try:
-
-        await update.message.chat.send_action(
-            "typing"
-        )
-
-    except Exception:
-        pass
-
-    # -----------------------------------------------------
-    # AI
-    # -----------------------------------------------------
-
-    answer = await ai_reply(
-        text
-    )
-
-    # -----------------------------------------------------
-    # Save last reply
-    # -----------------------------------------------------
-
-    context.user_data[
-        "last_ai_reply"
-    ] = answer
-
-    # -----------------------------------------------------
-    # Translate button
-    # -----------------------------------------------------
-
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "🌐 Translate",
-                callback_data="translate_last",
+                label,
+                callback_data=f"lang|{code}|{voice}",
             )
         ]
+        for label, (code, voice) in LANGUAGES.items()
     ]
 
-    await update.message.reply_text(
-        answer,
-        reply_markup=InlineKeyboardMarkup(
-            keyboard
-        ),
-        disable_web_page_preview=True,
+    await message.reply_text(
+        "✅ ভিডিও পেয়েছি।\n\n"
+        "কোন ভাষায় ভয়েস চান?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
-# =========================================================
-# TRANSLATE LAST AI REPLY
-# =========================================================
+# ==================== LANGUAGE SELECTION ====================
 
-async def translate_last(
+async def language_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
+    """Process the video after a language is selected."""
     query = update.callback_query
-
-    if not query:
-        return
-
     await query.answer()
 
-    text = context.user_data.get(
-        "last_ai_reply"
-    )
+    file_id = context.user_data.get("pending_video_file_id")
 
-    if not text:
-
-        await query.message.reply_text(
-            "❌ আগের reply পাওয়া যাচ্ছে না।"
+    if not file_id:
+        await query.edit_message_text(
+            "আগে একটি ভিডিও পাঠান, তারপর ভাষা নির্বাচন করুন।"
         )
-
         return
 
     try:
+        _prefix, target_lang, voice = query.data.split("|", 2)
+    except ValueError:
+        await query.edit_message_text(
+            "ভাষা নির্বাচন বুঝতে পারিনি। আবার চেষ্টা করুন।"
+        )
+        return
 
-        await query.message.chat.send_action(
-            "typing"
+    await query.edit_message_text(
+        "⏳ ভিডিও প্রসেস হচ্ছে।\n\n"
+        "প্রথমবার AI মডেল ডাউনলোড হতে পারে, তাই সময় লাগতে পারে।"
+    )
+
+    temp_dir = Path(
+        tempfile.mkdtemp(prefix="video_translator_")
+    )
+
+    try:
+        telegram_file = await context.bot.get_file(file_id)
+
+        input_path = temp_dir / "input_video.mp4"
+        output_path = temp_dir / "translated_video.mp4"
+
+        await telegram_file.download_to_drive(
+            custom_path=str(input_path)
         )
 
-    except Exception:
-        pass
+        _original, translated = await process_video(
+            input_path,
+            output_path,
+            target_lang,
+            voice,
+        )
 
-    result = await translate_text(
-        text
-    )
+        if not output_path.exists():
+            raise RuntimeError("আউটপুট ভিডিও তৈরি হয়নি।")
 
-    await query.message.reply_text(
-        "🌐 Translation:\n\n" + result,
-        disable_web_page_preview=True,
-    )
+        if output_path.stat().st_size > 49 * 1024 * 1024:
+            await query.message.reply_text(
+                "ভিডিও তৈরি হয়েছে, কিন্তু ফাইলটি Telegram-এ "
+                "পাঠানোর জন্য অনেক বড়। ছোট ভিডিও দিয়ে চেষ্টা করুন।"
+            )
+            return
+
+        await query.message.reply_text(
+            "✅ অনুবাদ সম্পন্ন! ভিডিও পাঠাচ্ছি..."
+        )
+
+        with output_path.open("rb") as video_file:
+            await query.message.reply_video(
+                video=video_file,
+                caption="অনুবাদ করা ভিডিও 🎧",
+                supports_streaming=True,
+                read_timeout=120,
+                write_timeout=120,
+                connect_timeout=30,
+            )
+
+        await query.message.reply_text(
+            "📝 অনুবাদ করা কথার নমুনা:\n\n"
+            + translated[:3000]
+        )
+
+    except Exception as exc:
+        log.exception("Video processing failed")
+
+        error_text = str(exc)
+
+        if TOKEN:
+            error_text = error_text.replace(TOKEN, "[TOKEN]")
+
+        await query.message.reply_text(
+            "দুঃখিত, ভিডিও প্রসেস করা যায়নি।\n\n"
+            "সম্ভাব্য কারণ:\n"
+            "• FFmpeg ইনস্টল করা নেই\n"
+            "• ইন্টারনেট বা অনুবাদ পরিষেবার সমস্যা\n"
+            "• কম RAM বা ডিস্ক স্পেস\n"
+            "• ভিডিওতে পরিষ্কার কথা নেই\n\n"
+            "বিস্তারিত ত্রুটি:\n"
+            + error_text[:900]
+        )
+
+    finally:
+        context.user_data.pop(
+            "pending_video_file_id",
+            None,
+        )
+
+        shutil.rmtree(
+            temp_dir,
+            ignore_errors=True,
+        )
 
 
-# =========================================================
-# ERROR HANDLER
-# =========================================================
+# ==================== ERROR HANDLER ====================
 
 async def error_handler(
     update: object,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
-    logger.error(
-        "Telegram error: %s",
-        context.error,
-        exc_info=True,
+    """Log unexpected Telegram errors."""
+    log.error(
+        "Unhandled Telegram error",
+        exc_info=context.error,
     )
 
 
-# =========================================================
-# MAIN
-# =========================================================
+# ==================== START BOT ====================
 
 def main():
+    """Start the Telegram bot."""
+    if not TOKEN:
+        raise SystemExit(
+            "TELEGRAM_BOT_TOKEN সেট করা নেই।\n\n"
+            "Linux/macOS:\n"
+            "export TELEGRAM_BOT_TOKEN='YOUR_TOKEN'\n\n"
+            "Windows PowerShell:\n"
+            '$env:TELEGRAM_BOT_TOKEN="YOUR_TOKEN"'
+        )
 
-    application = (
+    ensure_ffmpeg()
+
+    app = (
         Application.builder()
-        .token(BOT_TOKEN)
+        .token(TOKEN)
         .build()
     )
 
-    # =====================================================
-    # COMMANDS
-    # =====================================================
-
-    application.add_handler(
-        CommandHandler(
-            "start",
-            start,
-        )
+    app.add_handler(
+        CommandHandler("start", start)
     )
 
-    application.add_handler(
-        CommandHandler(
-            "help",
-            help_command,
-        )
+    app.add_handler(
+        CommandHandler("help", help_command)
     )
 
-    application.add_handler(
-        CommandHandler(
-            "about",
-            about_command,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "translate",
-            translate_command,
-        )
-    )
-
-    # =====================================================
-    # BUTTONS
-    # =====================================================
-
-    application.add_handler(
-        CallbackQueryHandler(
-            translate_last,
-            pattern=r"^translate_last$",
-        )
-    )
-
-    application.add_handler(
-        CallbackQueryHandler(
-            button_handler,
-            pattern=r"^(about|translate_help)$",
-        )
-    )
-
-    # =====================================================
-    # TEXT MESSAGES
-    # =====================================================
-
-    application.add_handler(
+    app.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            handle_message,
+            filters.VIDEO | filters.Document.VIDEO,
+            video_handler,
         )
     )
 
-    # =====================================================
-    # ERROR
-    # =====================================================
-
-    application.add_error_handler(
-        error_handler
-    )
-
-    # =====================================================
-    # RENDER
-    # =====================================================
-
-    port = int(
-        os.getenv(
-            "PORT",
-            "10000",
+    app.add_handler(
+        CallbackQueryHandler(
+            language_handler,
+            pattern=r"^lang\|",
         )
     )
 
-    render_url = os.getenv(
-        "RENDER_EXTERNAL_URL"
+    app.add_error_handler(error_handler)
+
+    log.info("AI Video Voice Translator Bot is starting...")
+
+    app.run_polling(
+        allowed_updates=Update.ALL_TYPES
     )
 
-    # =====================================================
-    # WEBHOOK
-    # =====================================================
-
-    if render_url:
-
-        webhook_url = (
-            render_url.rstrip("/")
-            + "/telegram/"
-            + BOT_TOKEN
-        )
-
-        logger.info(
-            "Starting Render webhook..."
-        )
-
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=port,
-            url_path="telegram/" + BOT_TOKEN,
-            webhook_url=webhook_url,
-            drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES,
-        )
-
-    # =====================================================
-    # POLLING
-    # =====================================================
-
-    else:
-
-        logger.info(
-            "RENDER_EXTERNAL_URL not found."
-        )
-
-        logger.info(
-            "Starting Telegram polling..."
-        )
-
-        application.run_polling(
-            drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES,
-        )
-
-
-# =========================================================
-# RUN
-# =========================================================
 
 if __name__ == "__main__":
     main()
